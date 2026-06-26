@@ -18,6 +18,7 @@ For non-sensitive bugs, normal GitHub issues are fine.
 - Private vulnerability reporting is enabled.
 - GitHub secret scanning and push protection are enabled.
 - Automated security fixes are enabled where GitHub can apply them.
+- GitHub code scanning is enabled.
 
 ## Scope notes
 
