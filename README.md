@@ -1,6 +1,7 @@
 # torfast
 
 [![CI](https://github.com/hulgarhulgar23-gif/torfast/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hulgarhulgar23-gif/torfast/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/hulgarhulgar23-gif/torfast/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/hulgarhulgar23-gif/torfast/actions/workflows/codeql.yml)
 [![Release](https://img.shields.io/github/v/release/hulgarhulgar23-gif/torfast)](https://github.com/hulgarhulgar23-gif/torfast/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -9,6 +10,13 @@ Goal: build a faster Tor-like client/browser without dropping Tor quality.
 This repo starts from one rule: speed is only real if privacy, safety, and
 compatibility stay the same.
 
+## Public repo status
+
+- one maintainer owns review, releases, docs, benchmarks, and quality checks
+- CI and CodeQL pass on `main`
+- the repo homepage points to the latest saved benchmark proof
+- `v0.1.0` is published as a public source release
+
 ## Maintainer note
 
 This is currently a one-maintainer project.
@@ -16,8 +24,8 @@ This is currently a one-maintainer project.
 That maintainer owns the launcher/runtime work, benchmark tooling, and quality
 checks that compare Tor Browser, C Tor, and Arti.
 
-The public repo is new, but the work is active. It already has CI smoke checks,
-a source release, and a security policy.
+The public repo is new, but the work is active. It already has green CI, green
+CodeQL, a source release, and a security policy with private reporting.
 
 ## Why careful review matters
 
