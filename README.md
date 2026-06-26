@@ -33,8 +33,9 @@ a source release, and a security policy.
 - It keeps saved benchmark history and quality evidence so speed claims can be
   checked instead of guessed.
 
-For contribution rules, see [CONTRIBUTING.md](CONTRIBUTING.md). For sensitive
-issues, see [SECURITY.md](SECURITY.md).
+For contribution rules, see [CONTRIBUTING.md](CONTRIBUTING.md). For community
+rules, see [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). For sensitive issues, see
+[SECURITY.md](SECURITY.md).
 
 ## Current proof highlights
 
