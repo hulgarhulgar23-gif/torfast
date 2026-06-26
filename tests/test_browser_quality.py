@@ -4128,14 +4128,8 @@ class BrowserQualityTests(unittest.TestCase):
         self.assertTrue(updates["socks_auth_present"])
         self.assertEqual(updates["socks_auth_username_len"], 4)
         self.assertEqual(updates["socks_auth_password_len"], 6)
-        self.assertEqual(
-            updates["socks_auth_username_sha256_12"],
-            hashlib.sha256(b"user").hexdigest()[:12],
-        )
-        self.assertEqual(
-            updates["socks_auth_password_sha256_12"],
-            hashlib.sha256(b"secret").hexdigest()[:12],
-        )
+        self.assertNotIn("socks_auth_username_sha256_12", updates)
+        self.assertNotIn("socks_auth_password_sha256_12", updates)
         self.assertEqual(updates["socks_command"], "connect")
         self.assertEqual(updates["socks_target_host"], "www.torproject.org")
         self.assertEqual(updates["socks_target_port"], 443)
@@ -4462,7 +4456,7 @@ class BrowserQualityTests(unittest.TestCase):
         self.assertEqual(evidence_rows[0]["parent_channels"], 1)
         self.assertEqual(evidence_rows[0]["proxy_socket_rows"], 1)
         self.assertEqual(evidence_rows[0]["ci_auth_rows"], 1)
-        self.assertEqual(evidence_rows[0]["ci_auth_tap_matches"], 1)
+        self.assertEqual(evidence_rows[0]["ci_auth_tap_matches"], 0)
         self.assertEqual(evidence_rows[0]["socks_stream_bridge_rows"], 1)
         self.assertEqual(evidence_rows[0]["bridged_resources"], 1)
         self.assertEqual(evidence_rows[0]["stream_bridged_resources"], 1)

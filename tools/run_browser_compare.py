@@ -7,15 +7,12 @@ import argparse
 import base64
 from dataclasses import dataclass
 from datetime import datetime
-import hashlib
-import hmac
 import json
 import os
 from pathlib import Path
 import platform
 import queue
 import re
-import secrets
 import signal
 import shutil
 import socket
@@ -43,11 +40,6 @@ URLS = [
     "https://www.torproject.org/",
 ]
 
-_SENSITIVE_DIGEST_KEY = secrets.token_bytes(32)
-
-
-def sensitive_fingerprint_12(value: bytes) -> str:
-    return hmac.new(_SENSITIVE_DIGEST_KEY, value, hashlib.sha256).hexdigest()[:12]
 
 REQUIRED_DEFAULT_PREFS = {
     "browser.privatebrowsing.autostart": True,
@@ -5172,8 +5164,6 @@ class SocksClientToProxyParser:
             "socks_auth_request_elapsed_ms": round(elapsed_ms, 3),
             "socks_auth_username_len": username_len,
             "socks_auth_password_len": password_len,
-            "socks_auth_username_sha256_12": sensitive_fingerprint_12(username),
-            "socks_auth_password_sha256_12": sensitive_fingerprint_12(password),
         }
 
 

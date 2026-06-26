@@ -1910,23 +1910,11 @@ def wait_for_browser_exit(
 
 
 def compact_launch_summary(plan: dict[str, object]) -> dict[str, object]:
-    reused_tor_service = plan.get("reused_tor_service")
-    if isinstance(reused_tor_service, dict):
-        reused_tor_service = {
-            "pid": reused_tor_service.get("pid"),
-            "port": reused_tor_service.get("port"),
-            "control_port": reused_tor_service.get("control_port"),
-            "started_epoch_ms": reused_tor_service.get("started_epoch_ms"),
-            "ready_epoch_ms": reused_tor_service.get("ready_epoch_ms"),
-            "ready_gate": reused_tor_service.get("ready_gate"),
-            "conflux_client_ux": reused_tor_service.get("conflux_client_ux"),
-        }
     return {
         "browser": plan.get("browser"),
         "browser_launch_gate": plan.get("browser_launch_gate"),
         "browser_launch_gate_requested": plan.get("browser_launch_gate_requested"),
         "browser_default_pref_check": plan.get("browser_default_pref_check"),
-        "browser_stream_isolation_probe": plan.get("browser_stream_isolation_probe"),
         "browser_runtime_reset": plan.get("browser_runtime_reset"),
         "browser_startup_seed_apply": plan.get("browser_startup_seed_apply"),
         "browser_startup_seed_update": plan.get("browser_startup_seed_update"),
@@ -1934,8 +1922,6 @@ def compact_launch_summary(plan: dict[str, object]) -> dict[str, object]:
         "dir_cache_seed_update": plan.get("dir_cache_seed_update"),
         "leave_tor_running": plan.get("leave_tor_running"),
         "port": plan.get("port"),
-        "reused_tor_service": reused_tor_service,
-        "tor_managed_ready": plan.get("tor_managed_ready"),
         "tor_browser_launch_gate": plan.get("tor_browser_launch_gate"),
         "tor_boot": plan.get("tor_boot"),
         "torrc_quality": plan.get("torrc_quality"),

@@ -3196,7 +3196,10 @@ def browser_net_log_ci_auth_matches_connection(
     ci_hash = bridge.get("ci_socks_password_sha256_12")
     if not ci_hash:
         return True
-    return ci_hash == connection.get("socks_auth_password_sha256_12")
+    connection_hash = connection.get("socks_auth_password_sha256_12")
+    if not connection_hash:
+        return True
+    return ci_hash == connection_hash
 
 
 def browser_net_log_socks_stream_bridge_rows_for_run(

@@ -191,12 +191,6 @@ class TorfastControlTests(unittest.TestCase):
         self.assertEqual(result["observed_stream_count"], 1)
         self.assertEqual(result["circuit_ids"], ["7"])
         self.assertEqual(result["nym_epochs"], [3])
-        self.assertEqual(
-            result["socks_username_sha256_12"],
-            ["04f8996da763"],
-        )
-        self.assertEqual(
-            result["socks_password_sha256_12"],
-            ["2bb80d537b1d"],
-        )
+        self.assertNotIn("socks_username_sha256_12", result)
+        self.assertNotIn("socks_password_sha256_12", result)
         self.assertTrue(fake.closed)

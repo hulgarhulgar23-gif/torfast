@@ -2,17 +2,11 @@
 
 from __future__ import annotations
 
-import hashlib
-import hmac
 from pathlib import Path
 import re
-import secrets
 import shlex
 import socket
 import time
-
-
-_SENSITIVE_DIGEST_KEY = secrets.token_bytes(32)
 
 
 class TorControlClient:
@@ -328,20 +322,6 @@ def summarize_stream_isolation(
             if isinstance(stream.get("target"), str)
         }
     )
-    socks_usernames = sorted(
-        {
-            sensitive_fingerprint_12(str(stream["socks_username"]))
-            for stream in streams
-            if isinstance(stream.get("socks_username"), str)
-        }
-    )
-    socks_passwords = sorted(
-        {
-            sensitive_fingerprint_12(str(stream["socks_password"]))
-            for stream in streams
-            if isinstance(stream.get("socks_password"), str)
-        }
-    )
     nym_epochs = sorted(
         {
             int(stream["nym_epoch"])
@@ -380,15 +360,8 @@ def summarize_stream_isolation(
         "statuses": statuses,
         "target_count": len(targets),
         "targets": targets[:8],
-        "socks_username_sha256_12": socks_usernames,
-        "socks_password_sha256_12": socks_passwords,
         "nym_epochs": nym_epochs,
         "session_groups": session_groups,
         "iso_fields": iso_fields,
         "target_substrings": target_substrings,
     }
-
-
-def sensitive_fingerprint_12(value: str) -> str:
-    payload = value.encode("utf-8", errors="surrogateescape")
-    return hmac.new(_SENSITIVE_DIGEST_KEY, payload, hashlib.sha256).hexdigest()[:12]
