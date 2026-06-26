@@ -12,6 +12,14 @@ This is currently a one-maintainer project.
 That maintainer owns the launcher/runtime work, benchmark tooling, and quality
 checks that compare Tor Browser, C Tor, and Arti.
 
+## Why this repo matters
+
+- It compares real Tor Browser behavior across Tor Browser's bundled Tor, local
+  C Tor, and Arti.
+- It treats privacy and compatibility rules as hard gates, not optional tradeoffs.
+- It keeps saved benchmark history and quality evidence so speed claims can be
+  checked instead of guessed.
+
 ## Current stance
 
 We should not make a "fast Tor" by doing unsafe things:
