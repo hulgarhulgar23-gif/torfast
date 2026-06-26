@@ -22,6 +22,9 @@ checks that compare Tor Browser, C Tor, and Arti.
 - It keeps saved benchmark history and quality evidence so speed claims can be
   checked instead of guessed.
 
+For contribution rules, see [CONTRIBUTING.md](CONTRIBUTING.md). For sensitive
+issues, see [SECURITY.md](SECURITY.md).
+
 ## Current stance
 
 We should not make a "fast Tor" by doing unsafe things:
