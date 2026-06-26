@@ -25,6 +25,25 @@ checks that compare Tor Browser, C Tor, and Arti.
 For contribution rules, see [CONTRIBUTING.md](CONTRIBUTING.md). For sensitive
 issues, see [SECURITY.md](SECURITY.md).
 
+## Current proof highlights
+
+- C Tor Conflux, with standard 3-hop circuits kept intact, showed about `2-3x`
+  bulk-download throughput versus disabling it. See
+  [docs/latest-results.md](docs/latest-results.md).
+- The `torfast` runtime path now has saved proof for faster repeated open and
+  warm/open flows without changing Tor Browser privacy rules. See
+  [docs/latest-results.md](docs/latest-results.md).
+- The repo keeps quality gates for path safety, browser prefs, and Arti/C Tor
+  checks so faster runs can be rejected when the privacy bar is not met.
+
+## Quick start
+
+```sh
+python3 -m pip install -e .
+torfast install-browser
+torfast launch
+```
+
 ## Current stance
 
 We should not make a "fast Tor" by doing unsafe things:
