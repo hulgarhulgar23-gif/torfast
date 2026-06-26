@@ -7,10 +7,17 @@ If you find a security issue, privacy regression, or anything that could weaken
 Tor-style protections:
 
 - please do not open a public issue first
+- use GitHub's private vulnerability reporting for this repo when possible
 - report enough detail to reproduce the problem
 - include affected files, commands, and any saved proof you used
 
 For non-sensitive bugs, normal GitHub issues are fine.
+
+## Current repo protections
+
+- Private vulnerability reporting is enabled.
+- GitHub secret scanning and push protection are enabled.
+- Automated security fixes are enabled where GitHub can apply them.
 
 ## Scope notes
 
