@@ -14,7 +14,7 @@ compatibility stay the same.
 
 - one maintainer owns issue triage, review, releases, docs, benchmarks, and quality checks
 - `main` is protected, and CI plus CodeQL pass on it
-- the repo homepage points to the latest saved benchmark proof
+- the repo homepage points to a short public proof summary
 - `v0.1.0` is published as a public source release
 
 ## Maintainer note
@@ -44,7 +44,8 @@ policy with private reporting.
 
 For contribution rules, see [CONTRIBUTING.md](CONTRIBUTING.md). For community
 rules, see [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). For sensitive issues, see
-[SECURITY.md](SECURITY.md).
+[SECURITY.md](SECURITY.md). For the short public proof page, see
+[docs/proof-summary.md](docs/proof-summary.md).
 
 ## Current proof highlights
 
