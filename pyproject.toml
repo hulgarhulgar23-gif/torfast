@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "torfast"
+version = "0.1.0"
+description = "Fast-path launcher and lab CLI for Tor Browser over verified Tor-compatible clients"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+torfast = "torfast.__main__:main"
+
+[tool.setuptools]
+packages = ["torfast"]
