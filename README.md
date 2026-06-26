@@ -13,7 +13,7 @@ compatibility stay the same.
 ## Public repo status
 
 - one maintainer owns issue triage, review, releases, docs, benchmarks, and quality checks
-- CI and CodeQL pass on `main`
+- `main` is protected, and CI plus CodeQL pass on it
 - the repo homepage points to the latest saved benchmark proof
 - `v0.1.0` is published as a public source release
 
