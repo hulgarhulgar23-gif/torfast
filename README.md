@@ -1,5 +1,7 @@
 # tor-fast lab
 
+[![CI](https://github.com/hulgarhulgar23-gif/torfast/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hulgarhulgar23-gif/torfast/actions/workflows/ci.yml)
+
 Goal: build a faster Tor-like client/browser without dropping Tor quality.
 
 This repo starts from one rule: speed is only real if privacy, safety, and

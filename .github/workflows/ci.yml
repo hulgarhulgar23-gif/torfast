@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Compile Python files
+        run: |
+          python -m py_compile $(find torfast tools tests -name '*.py' | sort)
+
+      - name: Run fast smoke tests
+        run: |
+          python -m unittest \
+            tests.test_path_rules \
+            tests.test_browser_defaults \
+            tests.test_browser_install \
+            tests.test_torfast_main
