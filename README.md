@@ -12,7 +12,7 @@ compatibility stay the same.
 
 ## Public repo status
 
-- one maintainer owns review, releases, docs, benchmarks, and quality checks
+- one maintainer owns issue triage, review, releases, docs, benchmarks, and quality checks
 - CI and CodeQL pass on `main`
 - the repo homepage points to the latest saved benchmark proof
 - `v0.1.0` is published as a public source release
@@ -21,11 +21,12 @@ compatibility stay the same.
 
 This is currently a one-maintainer project.
 
-That maintainer owns the launcher/runtime work, benchmark tooling, and quality
-checks that compare Tor Browser, C Tor, and Arti.
+That maintainer owns issue triage, launcher/runtime work, benchmark tooling,
+and quality checks that compare Tor Browser, C Tor, and Arti.
 
 The public repo is new, but the work is active. It already has green CI, green
-CodeQL, a source release, and a security policy with private reporting.
+CodeQL, public issue forms, a PR template, a source release, and a security
+policy with private reporting.
 
 ## Why careful review matters
 
