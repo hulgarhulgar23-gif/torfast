@@ -1,6 +1,8 @@
-# tor-fast lab
+# torfast
 
 [![CI](https://github.com/hulgarhulgar23-gif/torfast/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hulgarhulgar23-gif/torfast/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/hulgarhulgar23-gif/torfast)](https://github.com/hulgarhulgar23-gif/torfast/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 Goal: build a faster Tor-like client/browser without dropping Tor quality.
 
@@ -13,6 +15,15 @@ This is currently a one-maintainer project.
 
 That maintainer owns the launcher/runtime work, benchmark tooling, and quality
 checks that compare Tor Browser, C Tor, and Arti.
+
+The public repo is new, but the work is active. It already has CI smoke checks,
+a source release, and a security policy.
+
+## Why careful review matters
+
+- This repo changes launcher, proxy, and browser behavior.
+- Bad speed work can hurt privacy or compatibility.
+- One maintainer means review time is a real bottleneck.
 
 ## Why this repo matters
 

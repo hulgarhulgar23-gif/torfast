@@ -1,0 +1,46 @@
+name: Bug report
+description: Report a public bug or compatibility problem.
+title: "[bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not use this form for sensitive security or privacy issues.
+        Please use the security policy instead.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Say what broke and what you expected.
+      placeholder: Tor Browser launch failed after...
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Share the smallest repeatable path.
+      placeholder: |
+        1. Run ...
+        2. Launch ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: Saved proof
+      description: Link any saved JSON, screenshot, result folder, or log.
+      placeholder: results/... or screenshot path
+  - type: textarea
+    id: risk
+    attributes:
+      label: Privacy or compatibility risk
+      description: Say if this could affect path safety, DNS safety, fingerprint protections, or browser behavior.
+      placeholder: This looks like a compatibility bug only...
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Share OS, Python version, and relevant Tor Browser or proxy version.
+      placeholder: macOS 15, Python 3.11, Tor Browser 14.x

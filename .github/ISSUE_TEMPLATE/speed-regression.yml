@@ -1,0 +1,52 @@
+name: Speed or regression report
+description: Report a speed result, slowdown, or lab finding.
+title: "[perf] "
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: What did you measure?
+      description: Say what got faster, slower, or changed.
+      placeholder: Warm open got faster than local cold C Tor by...
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command or workflow
+      description: Share the command, script, or target pack you used.
+      placeholder: python3 tools/run_browser_compare.py ...
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: Saved proof
+      description: Link the saved result JSON, screenshot set, or analysis output.
+      placeholder: results/.../browser-compare.json
+    validations:
+      required: true
+  - type: textarea
+    id: baseline
+    attributes:
+      label: Baseline and comparison
+      description: Say what you compared against and how large the change was.
+      placeholder: Compared with stock bundled Tor...
+  - type: textarea
+    id: privacy
+    attributes:
+      label: Privacy and compatibility check
+      description: Say why the result still meets the repo quality bar.
+      placeholder: Path rules stayed the same and browser prefs matched...
+    validations:
+      required: true
+  - type: dropdown
+    id: default_state
+    attributes:
+      label: Safe by default?
+      options:
+        - Safe by default
+        - Lab only
+        - Not sure yet
+    validations:
+      required: true
