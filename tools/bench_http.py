@@ -102,6 +102,7 @@ def fetch(
         if parsed.scheme == "https":
             tls_started = time.perf_counter()
             context = ssl.create_default_context()
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
             stream = context.wrap_socket(raw_sock, server_hostname=host)
             tls_ms = elapsed_ms(tls_started)
 
