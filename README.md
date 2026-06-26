@@ -5,6 +5,13 @@ Goal: build a faster Tor-like client/browser without dropping Tor quality.
 This repo starts from one rule: speed is only real if privacy, safety, and
 compatibility stay the same.
 
+## Maintainer note
+
+This is currently a one-maintainer project.
+
+That maintainer owns the launcher/runtime work, benchmark tooling, and quality
+checks that compare Tor Browser, C Tor, and Arti.
+
 ## Current stance
 
 We should not make a "fast Tor" by doing unsafe things:
