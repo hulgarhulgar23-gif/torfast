@@ -21,6 +21,17 @@ from bench_http import fetch
 
 TARGET = "https://check.torproject.org/"
 
+# Conflux runtime proof: `ConfluxEnabled auto` in the torrc only proves the
+# config request; the consensus (or an unsupporting binary) can still leave
+# Conflux off. The live proof is linked conflux legs on the control port. A
+# linked set is two legs, so 2 BUILT CONFLUX_LINKED circuits prove one usable
+# set; saved product-path runs show 4-6 legs within seconds of bootstrap.
+CONFLUX_LINKED_PURPOSE = "CONFLUX_LINKED"
+CONFLUX_ACCEPTED_CONFIG_VALUES = frozenset({"auto", "1"})
+CONFLUX_LINKED_MIN_BUILT = 2
+CONFLUX_LINKED_WAIT_MAX_SECONDS = 45.0
+CONFLUX_LINKED_POLL_SECONDS = 1.0
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -28,6 +39,14 @@ def main() -> int:
     parser.add_argument("--target", default=TARGET)
     parser.add_argument("--socks-port", type=int, default=19110)
     parser.add_argument("--control-port", type=int, default=19111)
+    parser.add_argument(
+        "--no-require-conflux",
+        action="store_true",
+        help=(
+            "still record the Conflux runtime proof but do not fail the check "
+            "when Conflux is not live (lab comparisons only)"
+        ),
+    )
     args = parser.parse_args()
 
     tor_bin = Path(args.tor_bin).resolve()
@@ -45,6 +64,7 @@ def main() -> int:
         socks_port=args.socks_port,
         control_port=args.control_port,
         output_dir=output_dir,
+        require_conflux=not args.no_require_conflux,
     )
     output_path = output_dir / "c-tor-circuits.json"
     output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
@@ -60,6 +80,7 @@ def run_check(
     socks_port: int,
     control_port: int,
     output_dir: Path,
+    require_conflux: bool = True,
 ) -> dict[str, object]:
     data_dir = output_dir / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -107,6 +128,8 @@ def run_check(
             "fetch": None,
             "circuits": [],
             "checked_circuit_count": 0,
+            "conflux": None,
+            "conflux_required": require_conflux,
             "ok": False,
         }
         if not boot["ok"]:
@@ -126,7 +149,8 @@ def run_check(
             cookie_path=cookie_path,
         )
         try:
-            circuits = parse_circuits(client.command("GETINFO circuit-status"))
+            conflux_proof, circuits = collect_conflux_runtime_proof(client)
+            payload["conflux"] = conflux_proof
             router_cache: dict[str, dict[str, object]] = {}
             checked = []
             for circuit in circuits:
@@ -146,6 +170,7 @@ def run_check(
                 fetch_result.ok
                 and bool(checked)
                 and all(circuit["ok"] for circuit in checked)
+                and (conflux_proof["ok"] or not require_conflux)
             )
             return payload
         finally:
@@ -180,6 +205,67 @@ class TorControlClient:
 
     def close(self) -> None:
         self.sock.close()
+
+
+def parse_getconf_value(reply: str, key: str) -> str | None:
+    for line in reply.splitlines():
+        stripped = line.strip()
+        for prefix in ("250 ", "250-"):
+            if stripped.startswith(prefix):
+                stripped = stripped[len(prefix) :]
+                break
+        else:
+            continue
+        name, sep, value = stripped.partition("=")
+        if name == key:
+            return value if sep else ""
+    return None
+
+
+def count_built_conflux_linked(circuits: list[dict[str, object]]) -> int:
+    return sum(
+        1
+        for circuit in circuits
+        if circuit.get("status") == "BUILT"
+        and circuit.get("purpose") == CONFLUX_LINKED_PURPOSE
+    )
+
+
+def collect_conflux_runtime_proof(
+    client: "TorControlClient",
+    *,
+    min_built: int = CONFLUX_LINKED_MIN_BUILT,
+    wait_max_seconds: float = CONFLUX_LINKED_WAIT_MAX_SECONDS,
+    poll_seconds: float = CONFLUX_LINKED_POLL_SECONDS,
+    monotonic=time.monotonic,
+    sleep=time.sleep,
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    """Prove Conflux is live and return the circuit snapshot that proves it.
+
+    The returned snapshot is the one the caller must path-validate, so the
+    linked legs that satisfy the gate are the same circuits held to the
+    3-hop/guard/family/subnet rules.
+    """
+    config_value = parse_getconf_value(
+        client.command("GETCONF ConfluxEnabled"), "ConfluxEnabled"
+    )
+    config_ok = config_value in CONFLUX_ACCEPTED_CONFIG_VALUES
+    started = monotonic()
+    circuits = parse_circuits(client.command("GETINFO circuit-status"))
+    linked_built = count_built_conflux_linked(circuits)
+    while linked_built < min_built and monotonic() - started < wait_max_seconds:
+        sleep(poll_seconds)
+        circuits = parse_circuits(client.command("GETINFO circuit-status"))
+        linked_built = count_built_conflux_linked(circuits)
+    proof: dict[str, object] = {
+        "config_value": config_value,
+        "config_ok": config_ok,
+        "linked_built_count": linked_built,
+        "linked_built_required": min_built,
+        "wait_seconds": round(monotonic() - started, 3),
+        "ok": config_ok and linked_built >= min_built,
+    }
+    return proof, circuits
 
 
 def parse_circuits(reply: str) -> list[dict[str, object]]:
@@ -377,6 +463,7 @@ def stop_process(proc: subprocess.Popen[str]) -> None:
 
 
 def short_summary(payload: dict[str, object]) -> dict[str, object]:
+    conflux = payload.get("conflux")
     return {
         "ok": payload["ok"],
         "boot": payload["boot"],
@@ -387,6 +474,15 @@ def short_summary(payload: dict[str, object]) -> dict[str, object]:
             for circuit in payload.get("circuits", [])
             if circuit.get("errors")
         },
+        "conflux": (
+            {
+                "ok": conflux.get("ok"),
+                "config_value": conflux.get("config_value"),
+                "linked_built_count": conflux.get("linked_built_count"),
+            }
+            if isinstance(conflux, dict)
+            else None
+        ),
     }
 
 

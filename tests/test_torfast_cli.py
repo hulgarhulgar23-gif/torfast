@@ -15,6 +15,7 @@ from torfast.cli import (
     DEFAULT_BROWSER_LAUNCH_GATE,
     DEFAULT_FRESH_STATE_ROOT_PARENT,
     DEFAULT_STATE_ROOT,
+    DEFAULT_WAIT_READY_TIMEOUT,
     build_parser,
     build_action_command,
     collect_doctor,
@@ -87,6 +88,29 @@ class TorfastCliTests(unittest.TestCase):
         self.assertIn("--reuse-tor-if-running", command)
         self.assertIn("--start-managed-tor-only", command)
 
+    def test_build_warm_command_can_enable_warm_browser_prestart(self) -> None:
+        args = SimpleNamespace(
+            command="warm",
+            browser_bin=self.EXISTING_BIN,
+            tor_bin=self.EXISTING_BIN,
+            url="about:tor",
+            port=19450,
+            state_root=str(DEFAULT_STATE_ROOT),
+            conflux_client_ux=None,
+            browser_timeout=0.0,
+            headless=False,
+            skip_browser_default_pref_check=False,
+            dir_cache_seed_root="/tmp/torfast-seed",
+            no_dir_cache_seed=False,
+            browser_startup_seed_root="/tmp/torfast-browser-startup-seed",
+            no_browser_startup_seed=False,
+            warm_browser_prestart=True,
+        )
+
+        command = build_action_command(args)
+
+        self.assertIn("--warm-browser-prestart", command)
+
     def test_build_prime_command_primes_without_leaving_service_running(self) -> None:
         args = SimpleNamespace(
             command="prime",
@@ -110,6 +134,32 @@ class TorfastCliTests(unittest.TestCase):
         self.assertIn("--start-managed-tor-only", command)
         self.assertNotIn("--leave-tor-running", command)
         self.assertNotIn("--reuse-tor-if-running", command)
+        self.assertIn("--browser-launch-gate", command)
+        self.assertIn("tor_boot_100", command)
+
+    def test_build_prime_command_respects_explicit_gate_override(self) -> None:
+        args = SimpleNamespace(
+            command="prime",
+            browser_bin=self.EXISTING_BIN,
+            tor_bin=self.EXISTING_BIN,
+            url="about:tor",
+            port=19450,
+            state_root=str(DEFAULT_STATE_ROOT),
+            conflux_client_ux=None,
+            browser_timeout=0.0,
+            headless=False,
+            skip_browser_default_pref_check=False,
+            browser_launch_gate="socks_ready",
+            dir_cache_seed_root="/tmp/torfast-seed",
+            no_dir_cache_seed=False,
+            browser_startup_seed_root="/tmp/torfast-browser-startup-seed",
+            no_browser_startup_seed=False,
+        )
+
+        command = build_action_command(args)
+
+        gate_index = command.index("--browser-launch-gate") + 1
+        self.assertEqual(command[gate_index], "socks_ready")
 
     def test_build_launch_command_is_one_shot(self) -> None:
         args = SimpleNamespace(
@@ -163,6 +213,35 @@ class TorfastCliTests(unittest.TestCase):
 
         self.assertIn("--browser-launch-gate", command)
         self.assertIn("tor_boot_100", command)
+
+    def test_build_launch_command_forwards_managed_open_adaptive_wait_timeout(
+        self,
+    ) -> None:
+        args = SimpleNamespace(
+            command="launch",
+            browser_bin=self.EXISTING_BIN,
+            tor_bin=self.EXISTING_BIN,
+            url="about:tor",
+            port=19450,
+            state_root=str(DEFAULT_STATE_ROOT),
+            conflux_client_ux=None,
+            browser_timeout=0.0,
+            headless=False,
+            skip_browser_default_pref_check=False,
+            managed_open_adaptive_general_circuit_wait_timeout=0.75,
+            dir_cache_seed_root="/tmp/torfast-seed",
+            no_dir_cache_seed=False,
+            browser_startup_seed_root="/tmp/torfast-browser-startup-seed",
+            no_browser_startup_seed=False,
+        )
+
+        command = build_action_command(args)
+
+        self.assertIn(
+            "--managed-open-adaptive-general-circuit-wait-timeout",
+            command,
+        )
+        self.assertIn("0.75", command)
 
     def test_build_launch_command_uses_fresh_state_root_by_default(self) -> None:
         args = SimpleNamespace(
@@ -230,6 +309,30 @@ class TorfastCliTests(unittest.TestCase):
         args = parser.parse_args(["launch"])
 
         self.assertEqual(args.browser_launch_gate, DEFAULT_BROWSER_LAUNCH_GATE)
+
+    def test_wait_ready_parser_accepts_gate_and_timeout(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "wait-ready",
+                "--state-root",
+                "/tmp/torfast-warm",
+                "--gate",
+                "tor_boot_100",
+                "--timeout",
+                "45",
+            ]
+        )
+
+        self.assertEqual(args.command, "wait-ready")
+        self.assertEqual(args.state_root, "/tmp/torfast-warm")
+        self.assertEqual(args.gate, "tor_boot_100")
+        self.assertEqual(args.timeout, 45.0)
+
+    def test_wait_ready_parser_defaults(self) -> None:
+        args = build_parser().parse_args(["wait-ready"])
+
+        self.assertEqual(args.gate, DEFAULT_BROWSER_LAUNCH_GATE)
+        self.assertEqual(args.timeout, DEFAULT_WAIT_READY_TIMEOUT)
 
     def test_resolve_runtime_state_root_keeps_explicit_path(self) -> None:
         resolved = resolve_runtime_state_root(
@@ -520,6 +623,27 @@ class TorfastCliTests(unittest.TestCase):
         )
         subprocess_run.assert_not_called()
 
+    def test_main_handles_wait_ready_report(self) -> None:
+        with (
+            patch(
+                "torfast.cli.wait_for_managed_service_gate",
+                return_value={"ok": True, "resolved_gate": "tor_boot_95"},
+            ) as wait_ready,
+            patch("sys.stdout", new_callable=io.StringIO) as stdout,
+        ):
+            exit_code = main(["wait-ready", "--state-root", "/tmp/torfast-warm"])
+
+        self.assertEqual(exit_code, 0)
+        wait_ready.assert_called_once_with(
+            Path("/tmp/torfast-warm").resolve(),
+            requested_gate=DEFAULT_BROWSER_LAUNCH_GATE,
+            timeout=DEFAULT_WAIT_READY_TIMEOUT,
+        )
+        self.assertEqual(
+            json.loads(stdout.getvalue()),
+            {"ok": True, "resolved_gate": "tor_boot_95"},
+        )
+
     def test_warm_parser_accepts_runtime_args(self) -> None:
         args = build_parser().parse_args(
             [
@@ -553,18 +677,55 @@ class TorfastCliTests(unittest.TestCase):
         args = build_parser().parse_args(["launch"])
 
         self.assertEqual(args.state_root, AUTO_STATE_ROOT)
+        self.assertFalse(args.no_managed_open_browser_overlap)
+        self.assertTrue(args.no_managed_open_settle)
         self.assertTrue(args.no_browser_startup_seed)
 
     def test_plan_parser_defaults_to_auto_state_root(self) -> None:
         args = build_parser().parse_args(["plan"])
 
         self.assertEqual(args.state_root, AUTO_STATE_ROOT)
+        self.assertFalse(args.no_managed_open_browser_overlap)
+        self.assertTrue(args.no_managed_open_settle)
         self.assertTrue(args.no_browser_startup_seed)
 
     def test_launch_parser_accepts_browser_startup_seed_opt_in(self) -> None:
         args = build_parser().parse_args(["launch", "--browser-startup-seed"])
 
         self.assertFalse(args.no_browser_startup_seed)
+
+    def test_launch_parser_accepts_managed_open_settle_opt_in(self) -> None:
+        args = build_parser().parse_args(["launch", "--managed-open-settle"])
+
+        self.assertFalse(args.no_managed_open_settle)
+
+    def test_launch_parser_accepts_managed_open_browser_overlap_opt_in(self) -> None:
+        args = build_parser().parse_args(
+            ["launch", "--managed-open-browser-overlap"]
+        )
+
+        self.assertFalse(args.no_managed_open_browser_overlap)
+
+    def test_launch_parser_accepts_managed_open_browser_overlap_opt_out(self) -> None:
+        args = build_parser().parse_args(
+            ["launch", "--no-managed-open-browser-overlap"]
+        )
+
+        self.assertTrue(args.no_managed_open_browser_overlap)
+
+    def test_launch_parser_accepts_managed_open_adaptive_wait_timeout(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "launch",
+                "--managed-open-adaptive-general-circuit-wait-timeout",
+                "0.75",
+            ]
+        )
+
+        self.assertEqual(
+            args.managed_open_adaptive_general_circuit_wait_timeout,
+            0.75,
+        )
 
     def test_prime_parser_accepts_runtime_args(self) -> None:
         args = build_parser().parse_args(

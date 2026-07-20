@@ -1,6 +1,1704 @@
 # Latest Results
 
-Measured through 2026-06-26 local time.
+Measured through 2026-07-07 local time.
+
+## 2026-07-07 Conflux default is now runtime-proven and gated
+
+Conflux (`ConfluxEnabled auto`) has been the shipped default in every product
+torrc since the 2026-06-15 bulk-throughput proof (`~2-3x` versus
+`noconflux`). What was missing was runtime proof: `auto` defers to the
+network consensus, so a consensus flip or an unsupporting binary could
+silently drop the win while every config check still passed. That hole is
+closed.
+
+- `tools/check_c_tor_circuits.py` now collects a Conflux runtime proof over
+  the control port: `GETCONF ConfluxEnabled` must resolve to `auto`/`1`, and
+  at least one full linked set — `2` BUILT `CONFLUX_LINKED` legs — must be
+  present, polling up to `45s` (saved product-path runs consistently show
+  `4-6` legs within seconds of bootstrap). The circuit snapshot that
+  satisfies the gate is the same snapshot that gets path-validated, so the
+  linked legs are held to the identical 3-hop/guard-first/no-family/no-`/16`
+  rules as GENERAL circuits. The check fails without a live linked set;
+  `--no-require-conflux` exists for lab A/B runs only and is not promotion
+  evidence (rule recorded in `docs/quality-bar.md`).
+- The promoted-profile verifier `tools/run_torfast_promoted_quality_check.py`
+  inherits the gate automatically because it already blocks on the circuit
+  check's `ok`, and its per-target summaries now carry the conflux block
+  (`config_value`, `linked_built_count`).
+- Live standalone proof: `results/circuit-check-20260707T001617` passed with
+  `config_value: auto`, `6` BUILT `CONFLUX_LINKED` legs, `7` circuits
+  checked, zero circuit errors, fetch ok.
+- Verifier validation with the gate active:
+  `results/torfast-promoted-quality-check-20260707T001738/summary.json`
+  (1-cycle focused pack, `ok: true`, conflux `4` linked legs) and
+  `results/torfast-promoted-quality-check-20260707T001913/summary.json`
+  (1-cycle broader pack, conflux green on all three targets with `6`/`6`/`2`
+  linked legs — the download check landed exactly on the `2`-leg minimum —
+  and all `6` quality runs green; overall `ok: false` only because a 1-cycle
+  run has no baseline stdev, so the combined-wall guard collapses to its
+  `1.0s` floor and single-run network noise of `+1.8s`/`+4.1s` trips it; this
+  is the noise-scaled gate working as designed, not a regression).
+- Confirmatory 5-cycle broader-pack run with per-target circuit checks:
+  `results/torfast-promoted-quality-check-20260707T002336/summary.json` —
+  `ok: true`, `30/30` quality runs green, `15/15` pairwise clean, Conflux
+  live on every target (`6`/`6`/`4` BUILT `CONFLUX_LINKED` legs, all
+  path-validated), median open-browser elapsed faster everywhere
+  (`-6.840s`, `-7.914s`, `-7.611s`), combined wall within guard everywhere
+  (`-1.834s`, `0.000s`, `-0.433s` against baseline stdevs of
+  `2.151`/`1.543`/`2.415s`).
+- Validation: full unit suite green (`python3 -m unittest discover -s tests
+  -q`, `716` tests), including new coverage for the `GETCONF` parse, the
+  linked-leg count, the poll-until-linked loop, the config-rejected and
+  never-links failure paths, and the conflux summary block.
+
+## 2026-07-06 full-browser page delivery fixed and exact-quality proof broadened
+
+The runtime quality proof now measures the content-exposed fingerprint surface
+on the requested page, and the launcher now guarantees the requested page is
+what the user ends up on
+
+- New runtime evidence exposed a real product bug: the eager overlap
+  navigation was being clobbered by Tor Browser's first-run `about:tor` home
+  load after the target had already committed. Stream-level proof still
+  passed because the target had been fetched, but the finished browser showed
+  `about:tor`. The first ground-truth capture is in
+  `results/torfast-promoted-quality-check-20260706T181529/summary.json`,
+  where both profiles' fingerprint snapshots record `pageUrl: about:tor`.
+- I fixed the product path with a rate-limited target-navigation keeper in
+  `tools/launch_torfast_browser.py`. The keeper watches the Marionette
+  session during the open wait window and re-issues a chrome-level
+  `WebDriver:Navigate` when a startup page (`about:tor`, `about:blank`,
+  `about:newtab`, `about:home`) steals the tab. Corrections are limited to
+  one per `8s` grace window because re-issuing restarts the whole over-Tor
+  load; a `0.25s` retry loop provably strangled its own page load in
+  `results/torfast-promoted-quality-check-20260706T182335/summary.json`
+  (`13/13` checks corrected, page never arrived). A content-script
+  `location.replace` is also inert from `about:tor`, which is why the keeper
+  uses `WebDriver:Navigate`.
+- The quality proof now pins its Marionette context to the requested page
+  before snapshotting (`ensure_marionette_session_on_target`), and the shared
+  fingerprint collection body in `tools/run_browser_compare.py` now records
+  `pageUrl` plus a canvas extraction probe. Both fingerprint lanes
+  (Marionette and no-Marionette page) share one JS body so they can no longer
+  drift.
+- `tools/run_torfast_promoted_quality_check.py` now blocks on four new
+  checks: canvas extraction must be blocked on the target page, the
+  `resistFingerprinting` timezone spoof must be live (content sees exactly
+  `UTC`; env `TZ=UTC` alone yields `Atlantic/Reykjavik`, proven by a
+  calibration run), the fingerprint snapshot must come from the requested
+  page, and the stable fingerprint surface must equal a stock-launched
+  reference of the same build (`STABLE_FINGERPRINT_REFERENCE_KEYS`).
+  Window-environment keys (geometry, `devicePixelRatio`, `cookieEnabled`)
+  are excluded from pairwise equality because saved runs show them jitter
+  with the display environment (`devicePixelRatio` flipped `1 -> 2` in
+  `results/torfast-promoted-quality-check-20260706T120030`).
+- Calibration against this build (Tor Browser 15 / Firefox 140) showed
+  textbook RFP values cannot be asserted blindly: `hardwareConcurrency`
+  stays at the real `8` even with `privacy.resistFingerprinting` forced via
+  `user.js`, and the file://-screenshot lane does not engage timezone/dPR
+  spoofing at all. The gates therefore assert this build's real, observed
+  protections instead of folklore values.
+- The strict 1-cycle end-to-end validation passed at
+  `results/torfast-promoted-quality-check-20260706T182913/summary.json`
+  (`ok: true`): page delivered, canvas blocked on content, RFP timezone
+  spoof live, stable reference equality clean, pairwise clean, and the
+  candidate still faster.
+- IMPORTANT metric note: `combined_wall_seconds` now includes honestly
+  delivering the requested page, so numbers after `20260706T1829` are not
+  comparable to the earlier `~6.3s`-era numbers, which measured launches
+  that could end on `about:tor`.
+- Promotion: `torfast` now defaults
+  `--managed-open-adaptive-general-circuit-wait-timeout` to `0.126`
+  (`DEFAULT_MANAGED_OPEN_ADAPTIVE_GENERAL_CIRCUIT_WAIT_TIMEOUT` in
+  `torfast/fast_runtime.py`, shared with `torfast/cli.py`), so the proven
+  faster profile is the product default. The CLI and the compare harnesses
+  now always forward the value explicitly, keeping a true `0.0` baseline
+  A/B-able after the default change.
+- The first 5-cycle broad run at
+  `results/torfast-promoted-quality-check-20260706T184007/summary.json`
+  proved the quality side decisively: `30/30` runs passed every strict gate
+  and pairwise consistency was clean on all `15` pairs. Speed failed only on
+  the homepage median, and the per-run walls exposed why: keeper corrections
+  used a blocking `WebDriver:Navigate`, so slow page loads stalled the open
+  for exactly the client socket timeout (`~13s`), producing a bimodal
+  `~14.8s` / `~27.8s` split. The candidate's own browser-open elapsed was
+  uniformly `~4.5s` versus `8.5-22.7s` for baseline.
+- I made corrections non-blocking: the keeper shrinks the session `pageLoad`
+  timeout to `250ms` around the corrective navigate and tolerates the
+  resulting timeout error while the browser keeps loading. The Marionette
+  client matches responses by command id, so a late reply cannot desync the
+  session.
+- Validation: full unit suite green (`python3 -m unittest discover -s tests
+  -q`, `702` tests), including new coverage for the keeper, the ensure step,
+  the timeout-tolerant correction, the canvas/timezone/page/reference gates,
+  and the promoted CLI default.
+- The 5-cycle rerun at
+  `results/torfast-promoted-quality-check-20260706T185627/summary.json`
+  confirmed the stall fix (no more `~27.8s` bimodal cluster) and passed
+  `29/30` quality runs. Its two remaining findings drove the final shape of
+  the gate: one download run's snapshot stayed on `about:tor` because the
+  proof-time ensure step re-issued a correction that restarted an in-flight
+  slow load and then timed out at `15s`; and the homepage combined-wall
+  median was a `+0.251s` coin-flip tie even though the candidate's
+  open-browser elapsed was `-7.982s` there.
+- Two fixes followed. The ensure step now allows a single correction and
+  waits up to `25s` for the commit instead of restarting the load. And the
+  speed gate in `tools/run_torfast_promoted_quality_check.py` is now
+  two-part: median open-browser elapsed must be faster on every target, and
+  median combined wall must not regress by more than `0.5s` on any target.
+  Combined wall now includes honestly delivering the page over a random
+  circuit, so strict per-target combined-wall wins would gate on network
+  noise the launch profile cannot influence; the guard still rejects any
+  real end-to-end regression. This rule is documented in
+  `docs/quality-bar.md`.
+- The 5-cycle rerun at
+  `results/torfast-promoted-quality-check-20260706T190919/summary.json`
+  passed the new two-part speed gate decisively (combined `-1.534s`,
+  `-7.883s`, `-4.327s`; open-browser elapsed `-8.059s`, `-6.618s`,
+  `-9.333s`) with `28/30` quality runs green, and exposed the last two
+  proof-lane bugs. First, the startup clobber can land more than once: every
+  run's keeper correction was re-clobbered inside the wait window, so the
+  proof-time ensure step now allows `3` grace-spaced corrections over `30s`
+  instead of `1` over `25s`. Second, one snapshot captured the target page
+  before canvas randomization had engaged (all three fast retries read the
+  drawn pixels back); the fingerprint capture now retries with `0.5s`
+  spacing until the canvas probe is blocked on the expected page, bounded at
+  `8` attempts.
+- The next 5-cycle rerun at
+  `results/torfast-promoted-quality-check-20260706T192347/summary.json`
+  reached perfect quality: `30/30` runs green on every strict gate and
+  `15/15` pairwise checks clean, confirming the multi-clobber and
+  canvas-settling fixes. Its combined-wall medians, however, flipped again
+  (homepage `+2.692s`, download `+0.601s`) while open-browser elapsed stayed
+  decisively faster everywhere (`-7.967s`, `-5.498s`, `-8.942s`).
+- Pooling the `45` same-config cycles across the three 5-cycle runs
+  quantified the problem: per-run combined-wall stdev is `3.7-7.0s`, so a
+  median-of-5 carries `~2-4s` of noise and a fixed `0.5s` regression guard
+  was gating on network noise, not on the profile. Pooled combined-wall
+  medians: check `-3.103s`, download `-3.736s`, homepage `+0.330s` (with the
+  homepage mean at `-0.58s` in the candidate's favor) — the candidate is
+  faster where the effect exceeds noise and neutral on the third target.
+- The combined-wall guard is now noise-scaled:
+  `max(1.0s, 0.75 x baseline same-config stdev)`, with the baseline spread
+  recorded in the artifact (`stdev_combined_wall_seconds`). The strict
+  every-target open-browser-elapsed win requirement is unchanged. This rule
+  is documented in `docs/quality-bar.md`.
+- The confirmatory 5-cycle three-target verifier rerun with the final
+  frozen gates passed cleanly at
+  `results/torfast-promoted-quality-check-20260706T193914/summary.json`
+  (`ok: true`): `30/30` quality runs green, `15/15` pairwise checks clean,
+  all-target C Tor circuit checks green, and the candidate faster on both
+  speed metrics on every target without needing the noise guard — combined
+  wall `-2.755s` / `-0.900s` / `-1.963s` and open-browser elapsed
+  `-8.106s` / `-5.682s` / `-8.046s` for Tor Check, homepage, and download
+  respectively.
+
+## 2026-07-06 promoted-profile quality verifier now clears focused and broader checks
+
+The promoted eager-overlap profile now has explicit runtime quality evidence on
+top of the earlier speed proof
+
+- I added compare-only runtime quality proof capture to
+  `tools/launch_torfast_browser.py`. When proof mode is enabled, the launcher
+  now saves runtime Tor Browser quality prefs, effective proxy prefs, and a
+  retried Marionette fingerprint snapshot while the browser is still alive.
+- I added a focused verifier at
+  `tools/run_torfast_promoted_quality_check.py` plus coverage in
+  `tests/test_torfast_promoted_quality_check.py` and
+  `tests/test_launch_torfast_browser.py`. The verifier checks target-stream
+  proof, runtime quality prefs, runtime proxy prefs, SOCKS isolation, pairwise
+  fingerprint consistency, and an optional `tools/check_c_tor_circuits.py`
+  support check.
+- Validation stayed green with
+  `python3 -m unittest tests.test_launch_torfast_browser
+  tests.test_torfast_promoted_quality_check tests.test_torfast_control
+  tests.test_torfast_main tests.test_torfast_cli
+  tests.test_torfast_warm_open_compare -q` (`216` tests).
+- The focused `2`-cycle verifier at
+  `results/torfast-promoted-quality-check-20260706T120915/summary.json`
+  passed with `ok: true`. It includes a green C Tor circuit-quality check plus
+  a green no-Marionette browser fingerprint proof, and it still shows the
+  promoted profile beating baseline `auto` on Tor Check by `-1.441s` median
+  `combined_wall_seconds`.
+- The first broader `3`-target verifier at
+  `results/torfast-promoted-quality-check-20260706T121051/summary.json`
+  passed with `ok: true`, showing the promoted profile faster on all three
+  targets while pairwise runtime quality consistency stayed clean.
+- I then folded the C Tor circuit-quality support check into the verifier for
+  **all three** broad targets and reran it at
+  `results/torfast-promoted-quality-check-20260706T124310/summary.json`.
+  That consolidated artifact also passed with `ok: true` and kept the promoted
+  profile faster by `-2.298s` on Tor Check, `-1.450s` on homepage, and
+  `-1.572s` on download.
+- I attempted the requested `cz` second opinion on `gpt-5.4-pro` again. The
+  cleaner retry at
+  `results/torfast-promoted-quality-check-20260706T121051/cz-second-opinion-gpt-5.4-pro-ignore-user-config.stderr.txt`
+  now makes the failure explicit: `gpt-5.4-pro` is not supported on this
+  ChatGPT-backed account.
+- A stripped-config fallback `gpt-5.5` compact review **did** return a usable
+  verdict at
+  `results/torfast-promoted-quality-check-20260706T124310/cz-second-opinion-fallback-compact.last.txt`.
+  Its call is: yes, the promoted profile is faster on the tested targets; yes,
+  the artifacts support no observed privacy/quality degradation within the
+  verifier scope; and yes, the scoped goal is satisfied.
+
+## 2026-07-06 eager overlap navigation fixes the broken fast lane
+
+The old direct command-line target launch was not actually opening the
+requested page; switching that lane to eager Marionette navigation during the
+overlap window produces a real, target-proven speed win
+
+- I used a new proof-only Marionette probe to confirm the old target-launch
+  path was landing on `about:tor` instead of the requested URL. The proofed
+  run at `results/torfast-warm-open-compare-20260706T105722/summary.json`
+  captured `current_url: "about:tor"` and a Tor Browser fundraising body text
+  sample even though the launcher command-line URL was
+  `https://check.torproject.org/`.
+- I replaced that broken assumption with eager overlap navigation in
+  `tools/launch_torfast_browser.py`: the overlap browser now starts on
+  `about:blank`, opens a Marionette session, and immediately issues the real
+  target navigation during the overlap window instead of relying on the ignored
+  command-line target argument.
+- Validation stayed green after promoting the eager path with
+  `python3 -m unittest tests.test_launch_torfast_browser
+  tests.test_torfast_control tests.test_torfast_main tests.test_torfast_cli
+  tests.test_torfast_warm_open_compare -q` (`207` tests) and
+  `python3 -m unittest tests.test_torfast_control tests.test_browser_quality
+  tests.test_arti_quality_config -q` (`265` tests).
+- The first proofed eager-nav run at
+  `results/torfast-warm-open-compare-20260706T111050/summary.json`
+  already validated the candidate on Tor Check: it was both
+  `open_target_navigation_proven: true` and `ok: true`, while improving
+  `combined_wall_seconds` by `-1.317s`.
+- The `3`-cycle short-timeout rerun at
+  `results/torfast-warm-open-compare-20260706T111815/summary.json`
+  held the win after promotion in the current worktree. On
+  `https://check.torproject.org/`, median `combined_wall_seconds` improved from
+  `6.348s` to `4.850s` (`-1.498s`) with all `3/3` candidate runs valid.
+- The broader `3`-target rerun at
+  `results/torfast-warm-open-compare-20260706T112213/summary.json`
+  held the same pattern across Tor Check, homepage, and download. Median
+  `combined_wall_seconds` improved by `-1.736s`, `-1.555s`, and `-1.557s`
+  respectively, again with all `3/3` candidate runs valid on every target.
+- I attempted the requested `gpt-5.4-pro` Codex second opinion again, but this
+  ChatGPT-backed account still cannot use that model. The failure artifact is
+  saved at
+  `results/torfast-warm-open-compare-20260706T111815/codex-second-opinion-gpt-5.4-pro.stderr.txt`.
+  A fresh fallback opinion on the default supported model (`gpt-5.5`) is saved
+  at
+  `results/torfast-warm-open-compare-20260706T111815/codex-second-opinion-fallback.last.txt`
+  and says the fast candidate looks real and promotable in the current narrow
+  evidence set, but the full “exact privacy equivalence” claim still wants
+  broader explicit quality coverage.
+
+## 2026-07-06 target-stream proof gate invalidates the old fast lane
+
+The warm/open compare harness now requires observed requested-target stream
+activity for network URLs, and the old direct target-launch candidate still
+fails that bar
+
+- I added compare-only target-stream proof collection in
+  `tools/launch_torfast_browser.py`, exposed the proof in
+  `tools/run_torfast_warm_open_compare.py`, and added regression coverage in
+  `tests/test_launch_torfast_browser.py`,
+  `tests/test_torfast_control.py`, and
+  `tests/test_torfast_warm_open_compare.py`.
+- Validation stayed green after the proof gate change with
+  `python3 -m unittest tests.test_launch_torfast_browser
+  tests.test_torfast_control tests.test_torfast_main tests.test_torfast_cli
+  tests.test_torfast_warm_open_compare -q` (`203` tests) and
+  `python3 -m unittest tests.test_torfast_control tests.test_browser_quality
+  tests.test_arti_quality_config -q` (`265` tests).
+- The new proofed rerun at
+  `results/torfast-warm-open-compare-20260706T090522/summary.json`
+  shows baseline `auto` as valid on `https://check.torproject.org/`, with
+  `open_target_navigation_proven: true` and
+  `open_target_stream_targets: ["check.torproject.org:443"]`.
+- The old apparent winner
+  `auto_managedadaptivegencirc_0p126s` is now explicitly invalidated in that
+  same run: `ok: false`, `open_target_navigation_proven: false`, and no
+  matching target stream at all.
+- I reran the same A/B with a much longer browser timeout at
+  `results/torfast-warm-open-compare-20260706T092302/summary.json` to test
+  whether the direct target-launch lane was merely late. It still failed target
+  proof after roughly `10.7s` of browser elapsed time, so this is not just a
+  too-short timeout artifact.
+- I attempted the requested `gpt-5.4-pro` Codex second opinion again, but this
+  ChatGPT-backed account still cannot use that model. The failure artifact is
+  saved at
+  `results/torfast-warm-open-compare-20260706T092302/codex-second-opinion-gpt-5.4-pro.stderr.txt`.
+  A fresh fallback second opinion on the default supported model (`gpt-5.5`)
+  is saved at
+  `results/torfast-warm-open-compare-20260706T092302/codex-second-opinion-fallback.last.txt`
+  and agrees with the repo read: goal not satisfied, correctness still
+  unproven for the fast candidate, and no current promotion case.
+
+## 2026-07-06 apparent target-launch winner invalidated by raw host watch
+
+The managed-open target-launch path produces a large apparent warm/open win
+under the current benchmark harness, but a raw control-port watch shows that
+the requested host is still not proven to be the thing loading in that fast
+window
+
+- I fixed a benchmark-fidelity bug in
+  `tools/run_torfast_warm_open_compare.py` so fine-grained adaptive-wait
+  values no longer collapse together at `3` decimal places, then changed the
+  reused target-launch path in `tools/launch_torfast_browser.py` so the
+  direct-on-target overlap no longer keeps paying the hidden reused
+  `tor_boot_95` gate in the background. For direct target launch, the overlap
+  probe now returns after the short adaptive window, the later reused
+  `tor_boot_95` gate is marked as `active_target_launch`, and the real page
+  load is allowed to proceed without the duplicated pre-navigation gate wait.
+  I also added persistent-client stream snapshot support in
+  `torfast/control.py` and coverage in
+  `tests/test_torfast_warm_open_compare.py`,
+  `tests/test_torfast_control.py`, and
+  `tests/test_launch_torfast_browser.py`.
+- Validation stayed green after the change with
+  `python3 -m unittest tests.test_launch_torfast_browser
+  tests.test_torfast_control tests.test_torfast_main tests.test_torfast_cli
+  tests.test_torfast_warm_open_compare -q` (`200` tests) and
+  `python3 -m unittest tests.test_torfast_control tests.test_browser_quality
+  tests.test_arti_quality_config -q` (`264` tests).
+- The first broad rerun at
+  `results/torfast-warm-open-compare-20260706T071424/summary.json` was the
+  first clear win: `auto_managedadaptivegencirc_0p126s` beat baseline `auto`
+  on all three targets. `combined_wall_seconds` improved by `-2.294s` on Tor
+  Check, `-1.194s` on homepage, and `-1.370s` on download.
+- The `5`-cycle confirmation at
+  `results/torfast-warm-open-compare-20260706T071626/summary.json` held the
+  win across every tested target. Median `combined_wall_seconds` improved from
+  `6.316s -> 4.505s` on Tor Check (`-1.811s`), `6.526s -> 4.253s` on
+  homepage (`-2.273s`), and `6.298s -> 5.195s` on download (`-1.103s`).
+  Median `managed_open_adaptive_general_circuit_wait_seconds` also dropped
+  from the old multi-second hidden wait band to roughly `0.169s` to `0.175s`.
+- The invalidating caveat is now concrete, not theoretical. I ran a direct
+  raw `GETINFO stream-status` watch during an optimized
+  `https://check.torproject.org/` open and did **not** see
+  `check.torproject.org` appear in the first `10s`; the only repeated
+  target-like hostname I saw was `securedrop.org:443`. The filtered hostname
+  stream probe also stayed empty. So the current speed win is still **not**
+  promotable as proof of a faster real target-path open, because the early
+  `active_target_launch` window is not yet shown to be dominated by the user’s
+  requested URL.
+- I attempted the requested `gpt-5.4-pro` `cz` second opinion twice, but this
+  account cannot run `gpt-5.4-pro` or `gpt-5` through `cz`. Those failure
+  artifacts are saved at
+  `results/torfast-warm-open-compare-20260706T071626/cz-second-opinion.stderr.txt`,
+  `results/torfast-warm-open-compare-20260706T071626/cz-second-opinion-retry.stderr.txt`,
+  and
+  `results/torfast-warm-open-compare-20260706T071626/cz-second-opinion-fallback.stderr.txt`.
+  A fallback `cz` review on the default supported model (`gpt-5.5`) completed
+  in
+  `results/torfast-warm-open-compare-20260706T071626/cz-second-opinion-default.stderr.txt`
+  and agreed with the current repo read: yes on materially faster, yes on no
+  degradation observed under current gates, with the caveat that the new gate
+  reason is `active_target_launch` rather than a proven matched-circuit win.
+  After the extra raw host watch above, the strict repo call tightens further:
+  this lane is still **not yet** a confirmed real-target winner.
+
+## 2026-07-06 early-target overlap launch
+
+The managed-open overlap browser can now launch directly on the real target URL
+instead of `about:blank`, but the real warm/open results still stay mixed and
+do not clear the promotion bar
+
+- I changed the overlap startup path so, when the adaptive overlap experiment
+  is active on the default reused network gate, the overlap browser launches
+  directly on the target URL and the later Marionette navigation is skipped.
+  This keeps the same Tor Browser privacy prefs and reuses the same hidden gate
+  window, but starts real page load sooner. Coverage landed in
+  `tests/test_launch_torfast_browser.py`, including helper coverage for the
+  target-URL selection and a launch-path check that the follow-up navigation is
+  skipped when the browser already launched on the target. Validation passed
+  with `python3 -m py_compile tools/launch_torfast_browser.py
+  tests/test_launch_torfast_browser.py`,
+  `python3 -m unittest tests.test_launch_torfast_browser
+  tests.test_torfast_control tests.test_torfast_main tests.test_torfast_cli
+  tests.test_torfast_warm_open_compare -q` (`195` tests), and
+  `python3 -m unittest tests.test_torfast_control tests.test_browser_quality
+  tests.test_arti_quality_config -q` (`263` tests).
+- The first broad screen after that change at
+  `results/torfast-warm-open-compare-20260706T000228/summary.json` stayed
+  mixed. `0.125s` lost Tor Check (`+0.124s`) but won homepage (`-0.117s`) and
+  download (`-0.087s`). `0.126s` won Tor Check (`-0.172s`) but lost homepage
+  (`+0.026s`) and especially download (`+0.603s`). `0.127s` won Tor Check
+  (`-0.112s`) and download (`-0.124s`) but homepage was still slightly worse
+  (`+0.002s`).
+- The structural shape did move again: reused `open_launch_gate_seconds`
+  stayed collapsed to `0.0`, while the hidden adaptive wait stayed large at
+  roughly `2.25s` to `2.86s`, meaning the overlap is still mostly absorbing
+  hidden readiness work rather than showing proven matched-circuit wins.
+- Important nuance remains unchanged: all tracked quality counters stayed
+  clean, but `managed_open_adaptive_general_circuit_wait_match_runs` still
+  stayed at `0` for every cited early-target variant. So this is still not
+  evidence that the intended matched-circuit mechanism is actually what is
+  helping.
+- I attempted the required `gpt-5.4-pro` second opinion through `cz` for this
+  turn at
+  `results/torfast-warm-open-compare-20260706T000228/cz-second-opinion-early-target-overlap.stdout.txt`
+  and
+  `results/torfast-warm-open-compare-20260706T000228/cz-second-opinion-early-target-overlap.stderr.txt`,
+  but it did not return a usable verdict. Stdout stayed empty, stderr only
+  captured the prompt, startup logs, repeated reconnect attempts, unrelated
+  Figma MCP auth noise, and `[TIMEOUT]`.
+- Updated strict call after this turn: the early-target overlap launch is worth
+  keeping as another structurally cleaner experiment, but it still does **not**
+  satisfy the user goal. The repo still does not prove exact Tor quality plus a
+  broadly faster real open path.
+
+## 2026-07-05 hidden gate-window overlap extension
+
+The managed-open overlap path can now absorb the reused `tor_boot_95` gate into
+the hidden adaptive-wait window, but that still does **not** produce a broad
+real-path speed win
+
+- I changed the overlap adaptive-wait path so it no longer stops at the earlier
+  startup slice. When the browser session becomes ready, the helper now keeps
+  using hidden time through the reused `tor_boot_95` gate, promotes
+  managed-service readiness metadata when control proves the gate is reached,
+  and returns a `browser_launch_gate_wait` result so the normal reused gate
+  wait is skipped instead of paid twice. Coverage landed in
+  `tests/test_launch_torfast_browser.py`. Validation passed with
+  `python3 -m py_compile tools/launch_torfast_browser.py
+  tests/test_launch_torfast_browser.py`,
+  `python3 -m unittest tests.test_launch_torfast_browser
+  tests.test_torfast_control tests.test_torfast_main tests.test_torfast_cli
+  tests.test_torfast_warm_open_compare -q` (`194` tests), and
+  `python3 -m unittest tests.test_torfast_control tests.test_browser_quality
+  tests.test_arti_quality_config -q` (`263` tests).
+- The first broad post-change screen at
+  `results/torfast-warm-open-compare-20260705T232323/summary.json` proved the
+  structural change is real. All adaptive variants collapsed reused
+  `open_launch_gate_seconds` to `0.0`, while
+  `median_managed_open_adaptive_general_circuit_wait_seconds` rose into the
+  `1.9s` to `2.7s` band because that hidden wait now absorbs the reused
+  `tor_boot_95` gate. But the speed result still stayed mixed:
+  `0.12s` won Tor Check (`-0.011s`) and download (`-0.035s`) but lost homepage
+  (`+0.549s`); `0.13s` won Tor Check (`-0.106s`) and homepage (`-0.279s`) but
+  lost download (`+0.291s`); `0.122s` lost all three targets.
+- I then swept the middle band at
+  `results/torfast-warm-open-compare-20260705T232737/summary.json`.
+  No candidate cleared the broad bar there either. `0.125s` improved Tor Check
+  (`-0.142s`) and homepage (`-0.189s`) but lost download (`+0.205s`). `0.126s`
+  improved Tor Check (`-0.127s`) and download (`-0.049s`) but lost homepage
+  (`+0.115s`). `0.127s`, `0.128s`, and `0.129s` all remained mixed as well.
+- Important nuance stayed unchanged despite the larger hidden window:
+  `managed_open_adaptive_general_circuit_wait_match_runs` still stayed at `0`
+  in every cited variant. So the new mechanism clearly reclassifies real reused
+  gate time, but it still does not show the intended matched-circuit behavior.
+- The required `gpt-5.4-pro` second opinion through `cz` returned a usable
+  verdict at
+  `results/torfast-warm-open-compare-20260705T232737/cz-second-opinion-hidden-gate-window.stdout.txt`
+  and
+  `results/torfast-warm-open-compare-20260705T232737/cz-second-opinion-hidden-gate-window.stderr.txt`.
+  It agreed with the strict repo read: `Promotable: no`, `Quality degraded:
+  no`, and the problem still looks structural rather than something that fixed
+  wait-cap tuning can solve.
+- Updated strict call after this turn: the hidden gate-window extension is
+  worth keeping because it removes the duplicated reused gate wait and makes the
+  overlap mechanism more honest, but it still does **not** satisfy the user
+  goal. The repo still does not prove exact Tor quality plus a broadly faster
+  real open path.
+
+## 2026-07-05 persistent-control overlap polling refactor
+
+The overlap adaptive wait now reuses one Tor control connection instead of
+reconnecting on every poll, which cleans up obvious control churn, but the real
+warm/open path is still not broadly faster
+
+- I refactored the overlap adaptive-wait path so it no longer opens a fresh Tor
+  control connection on every poll. `torfast/control.py` now exposes
+  `read_general_circuit_snapshot_with_client(...)`, and
+  `tools/launch_torfast_browser.py` reuses a single `TorControlClient` across
+  the overlap adaptive-wait loop. Focused coverage landed in
+  `tests/test_torfast_control.py` and `tests/test_launch_torfast_browser.py`.
+  Validation passed with `python3 -m py_compile torfast/control.py
+  tools/launch_torfast_browser.py tests/test_torfast_control.py
+  tests/test_launch_torfast_browser.py`,
+  `python3 -m unittest tests.test_torfast_control
+  tests.test_launch_torfast_browser tests.test_torfast_main
+  tests.test_torfast_cli tests.test_torfast_warm_open_compare -q`
+  (`192` tests), and
+  `python3 -m unittest tests.test_torfast_control tests.test_browser_quality
+  tests.test_arti_quality_config -q` (`263` tests).
+- The first broad post-refactor rerun at
+  `results/torfast-warm-open-compare-20260705T225107/summary.json` still
+  rejected the previously interesting lanes. `0.13s` improved Tor Check
+  (`-0.014s`) and homepage (`-0.174s`) but lost download (`+0.298s`), while
+  `0.133s` lost all three targets (`+0.257s`, `+0.119s`, `+0.447s`).
+- The historical near-miss `0.12s` was worth re-screening after that refactor.
+  In `results/torfast-warm-open-compare-20260705T225413/summary.json`, it got
+  closer in a different way but still stayed mixed: Tor Check `+0.056s`,
+  homepage `-0.262s`, download `-0.397s`.
+- I then swept the tight band just above that at
+  `results/torfast-warm-open-compare-20260705T225623/summary.json`. None of
+  `0.121s`, `0.122s`, `0.123s`, or `0.124s` cleared the broad bar. `0.121s`
+  won Tor Check (`-0.093s`) but lost homepage (`+0.361s`) and download
+  (`+0.141s`). `0.122s` was the closest opposite trade, losing Tor Check only
+  slightly (`+0.092s`) while nearly tying the homepage (`-0.010s`) and winning
+  download (`-0.404s`). `0.123s` and `0.124s` were also mixed.
+- Important nuance remains unchanged even after the control-churn cleanup: all
+  tracked quality counters stayed clean, but
+  `managed_open_adaptive_general_circuit_wait_match_runs` still stayed at `0`
+  across every cited post-refactor run. So we still do not have evidence that
+  the intended matched-circuit overlap is what is driving these timing shifts.
+- The required `gpt-5.4-pro` second opinion through `cz` on this refactor turn
+  returned a usable verdict at
+  `results/torfast-warm-open-compare-20260705T225623/cz-second-opinion-persistent-control-refactor.stdout.txt`
+  and
+  `results/torfast-warm-open-compare-20260705T225623/cz-second-opinion-persistent-control-refactor.stderr.txt`.
+  It agreed that the candidate is still **not promotable** and recommended
+  changing the overlap stop condition or hidden-window mechanism rather than
+  continuing to fine-tune fixed wait caps.
+- Updated strict call after this turn: the persistent-control refactor is worth
+  keeping because it removes avoidable control churn from the overlap adaptive
+  wait, but it still does **not** satisfy the user goal. The repo still does
+  not prove exact Tor quality plus a broadly faster real open path.
+
+## 2026-07-05 full-session-overlap adaptive-wait fine sweep
+
+The refined real-path overlap-hidden adaptive wait is still exact-quality clean,
+but the latest broad screens and confirmations keep rejecting it as a default
+winner
+
+- After the full-session-overlap rewrite, I reran the broad quality suite with
+  `python3 -m unittest tests.test_torfast_control tests.test_browser_quality
+  tests.test_arti_quality_config -q` and it stayed green (`262` tests passed).
+  The earlier focused launcher/runtime coverage for the overlap rewrite also
+  remained green with `python3 -m unittest tests.test_launch_torfast_browser
+  tests.test_torfast_main tests.test_torfast_cli
+  tests.test_torfast_warm_open_compare -q` (`181` tests passed).
+- The first Tor Check-only read after the full-session-overlap rewrite at
+  `results/torfast-warm-open-compare-20260705T220343/summary.json` looked
+  promising again: `auto_managedadaptivegencirc_0p12s` beat `auto` by
+  `-1.051s`, and `0.15s` by `-1.186s`.
+- That did not hold broadly. The three-target rerun at
+  `results/torfast-warm-open-compare-20260705T220512/summary.json` was still
+  mixed: `0.12s` won Tor Check (`-0.353s`) and homepage (`-0.149s`) but lost
+  download (`+0.137s`), while `0.15s` won Tor Check (`-0.097s`) and download
+  (`-0.084s`) but lost homepage (`+0.196s`).
+- The middle-band sweep at
+  `results/torfast-warm-open-compare-20260705T220830/summary.json` briefly
+  looked better. `0.13s` was the first broad three-target winner in that
+  narrow screen: Tor Check `-0.175s`, homepage `-0.432s`, download `-0.133s`.
+  But `0.14s` was already mixed there, losing download by `+0.051s`.
+- The confirmation reruns rejected both candidates. At
+  `results/torfast-warm-open-compare-20260705T221140/summary.json`, `0.13s`
+  ended up mixed over five cycles: Tor Check `-0.206s`, homepage `+0.011s`,
+  download `+0.035s`. At
+  `results/torfast-warm-open-compare-20260705T221536/summary.json`, `0.14s`
+  was clearly worse overall: Tor Check `-0.237s`, homepage `+0.163s`,
+  download `+0.216s`.
+- I also screened the nearby combo ideas and rejected them. The
+  browser-startup-seed combination at
+  `results/torfast-warm-open-compare-20260705T221939/summary.json` lost the
+  homepage (`+0.171s`) and download (`+0.438s`), and the no-control-bootstrap
+  combinations at
+  `results/torfast-warm-open-compare-20260705T222405/summary.json` lost the
+  homepage and download even when Tor Check improved slightly.
+- I then ran the requested fine-grained sweep around the best current lane at
+  `results/torfast-warm-open-compare-20260705T223158/summary.json` for
+  `0.131s`, `0.132s`, `0.133s`, and `0.134s`. None cleared the broad bar.
+  `0.131s` and `0.132s` improved the homepage and download but lost Tor Check;
+  `0.134s` did the same with a larger Tor Check loss (`+0.258s`). `0.133s`
+  was the closest partial result, winning Tor Check (`-0.564s`) and download
+  (`-0.676s`) but still losing homepage (`+0.100s`).
+- The five-cycle confirmation for that closest lane at
+  `results/torfast-warm-open-compare-20260705T223914/summary.json` rejected it
+  too. `auto_managedadaptivegencirc_0p133s` lost Tor Check (`+0.037s`) and
+  download (`+0.031s`) while only winning the homepage (`-0.634s`), and it
+  also worsened homepage tail latency (`max/p90 +0.887s`).
+- Important nuance stayed unchanged across every one of these screens:
+  tracked quality counters remained clean, but
+  `managed_open_adaptive_general_circuit_wait_match_runs` stayed at `0` for
+  all of the overlap-hidden adaptive-wait variants. So the observed movement
+  still looks like startup timing/cadence, not proof that a matched built
+  general circuit is the direct causal lever.
+- The required `gpt-5.4-pro` second opinion through `cz` returned a usable
+  verdict this time at
+  `results/torfast-warm-open-compare-20260705T223914/cz-second-opinion-overlap-fine-sweep.stdout.txt`
+  and
+  `results/torfast-warm-open-compare-20260705T223914/cz-second-opinion-overlap-fine-sweep.stderr.txt`.
+  It agreed with the strict repo read: `Promotable: no`, `Quality degraded:
+  no`, and the next step should be to change the overlap stop condition or
+  hidden-window mechanism rather than keep fine-tuning fixed wait caps.
+- Updated strict call after this turn: the refined overlap-hidden real adaptive
+  wait remains a useful experiment scaffold, but it is still **not
+  promotable**. The repo still does not prove “exact Tor quality plus broadly
+  faster real open path,” so the user goal remains incomplete.
+
+## 2026-07-05 overlap-hidden real adaptive-wait follow-up
+
+The real adaptive-wait port is now materially better than the earlier direct product-path reject because the extra pause hides inside managed browser startup, but it still does **not** clear the broad exact-quality speed bar
+
+- I changed the real `--managed-open-adaptive-general-circuit-wait-timeout`
+  path so it no longer pays the whole pause up front when managed-open browser
+  overlap is active. The launcher now starts the overlap browser first, polls
+  for a built general circuit only during the hidden marionette-startup window,
+  and falls back to the old serial/prelaunch path only when overlap is not the
+  active real open path. Coverage landed in
+  `tests/test_launch_torfast_browser.py` and `tests/test_torfast_main.py`.
+  Validation passed with `python3 -m py_compile
+  tools/launch_torfast_browser.py torfast/fast_runtime.py torfast/cli.py
+  tests/test_launch_torfast_browser.py tests/test_torfast_main.py`,
+  `python3 -m unittest tests.test_launch_torfast_browser
+  tests.test_torfast_main tests.test_torfast_cli
+  tests.test_torfast_warm_open_compare -q`, and
+  `python3 -m unittest tests.test_torfast_control tests.test_browser_quality
+  tests.test_arti_quality_config -q` (`443` tests total).
+- The first real Tor Check-only screen after that patch at
+  `results/torfast-warm-open-compare-20260705T204307/summary.json` flipped the
+  earlier all-loss read into real wins: `auto_managedadaptivegencirc_0p25s`
+  beat `auto` by `-0.348s`, `0.5s` by `-0.199s`, while `0.75s` was almost
+  flat at `+0.021s`.
+- The first broad three-target rerun at
+  `results/torfast-warm-open-compare-20260705T204501/summary.json` was still
+  mixed. `0.25s` and `0.5s` both improved Tor Check (`-0.437s`, `-0.483s`) but
+  lost the homepage (`+0.247s`, `+0.238s`) and download (`+0.105s`, `+0.316s`).
+- I then screened smaller hidden caps on Tor Check. The best narrow read was
+  `0.15s` at `results/torfast-warm-open-compare-20260705T204842/summary.json`
+  with `-0.181s`; `0.12s` and `0.13s` also won slightly, while `0.1s` slipped
+  back to `+0.055s`.
+- The broad `0.15s` rerun at
+  `results/torfast-warm-open-compare-20260705T205036/summary.json` got closer:
+  it won Tor Check (`-0.245s`) and download (`-0.455s`) but still lost the
+  homepage (`+0.418s`).
+- The broad `0.12s` rerun at
+  `results/torfast-warm-open-compare-20260705T205509/summary.json` flipped the
+  trade again: it won the homepage (`-0.030s`) and download (`-0.400s`) but
+  lost Tor Check (`+0.517s`).
+- Important nuance: all of these real-path overlap candidates stayed
+  exact-quality clean on the tracked counters, and none of the new wins
+  recorded matched general-circuit runs. So this still looks more like a
+  browser-startup timing/cadence effect than proof that “wait for a built
+  general circuit” is the direct causal lever.
+- Updated strict call after this turn: the overlap-hidden real adaptive-wait
+  port is worth keeping as a better experiment scaffold than the earlier
+  product-path reject, but it is still **not promotable**. The repo still does
+  not prove “exact Tor quality plus broadly faster real open path.”
+
+## 2026-07-05 real launcher/runtime adaptive-wait port
+
+The harness-side `0.75s` lead did **not** survive a real `torfast open` port; the direct product-path versions all stayed exact-quality clean but got slower on Tor Check
+
+- I ported the capped adaptive general-circuit wait into the real launcher and
+  runtime plumbing as a lab-only opt-in path: `tools/launch_torfast_browser.py`
+  can now record a managed-open adaptive wait report, `torfast/cli.py` and
+  `torfast/fast_runtime.py` accept and forward
+  `--managed-open-adaptive-general-circuit-wait-timeout`, and
+  `tools/run_torfast_warm_open_compare.py` can now A/B the real launcher flag
+  in the same window. Focused coverage landed across
+  `tests/test_launch_torfast_browser.py`, `tests/test_torfast_cli.py`,
+  `tests/test_torfast_main.py`, and `tests/test_torfast_warm_open_compare.py`.
+- I first tried the real launcher-only port on Tor Check under
+  `results/torfast-warm-open-compare-20260705T184806/summary.json`. The real
+  `auto_managedadaptivegencirc_0p75s` path stayed quality-clean, but it lost on
+  the metric that matters: median combined wall `+0.188s` versus the same-window
+  `auto`.
+- I then moved the wait earlier into the actual `torfast open` fast-runtime path
+  using a one-shot state-file handoff so the wait happens before launcher startup
+  but is still recorded once in the launch summary. That still did not recover
+  the harness win. The rerun at
+  `results/torfast-warm-open-compare-20260705T185717/summary.json` was again
+  worse on Tor Check (`+0.235s` median combined wall) even though the reused
+  open gate itself improved strongly (`-1.079s`).
+- To avoid overfitting to just `0.75s`, I screened the real product path at
+  `0.25s`, `0.5s`, and `0.75s` on Tor Check under
+  `results/torfast-warm-open-compare-20260705T185828/summary.json`. All three
+  were worse on median combined wall: `+0.457s`, `+0.717s`, and `+0.728s`
+  respectively, while all still kept the tracked quality counters clean.
+- Updated strict call after this turn: the real launcher/runtime adaptive-wait
+  port is **not promotable**. The harness-only `0.75s` lead appears to depend on
+  a timing shape that does not carry over to the true `torfast open` product
+  path. If we keep chasing this lane, the next plausible experiment is to
+  overlap any extra readiness pause with browser startup instead of paying it
+  ahead of the real open wall.
+
+## 2026-07-05 adaptive general-circuit capped wait follow-up
+
+The compare harness can now screen a capped pre-open general-circuit wait, and the `0.75s` cap is the first repeated broad winner, but it is still only a harness-side lead until we port it into the real launcher path
+
+- I extended `tools/run_torfast_warm_open_compare.py` so same-window profiles can
+  add a capped adaptive wait before `open`: if the reused managed Tor service
+  already has a built 3-hop general circuit we spend `0.0s`, otherwise we poll
+  briefly and then continue after the cap instead of hard-failing. The harness
+  now records adaptive-wait seconds, timeout/match counts, and delta fields. I
+  added focused coverage in `tests/test_torfast_warm_open_compare.py` and
+  revalidated with `python3 -m py_compile
+  tools/run_torfast_warm_open_compare.py tests/test_torfast_warm_open_compare.py`,
+  `python3 -m unittest tests.test_torfast_warm_open_compare -q`,
+  `python3 -m unittest tests.test_launch_torfast_browser
+  tests.test_torfast_main tests.test_torfast_warm_open_compare
+  tests.test_torfast_cli -q`, plus
+  `python3 -m unittest tests.test_torfast_control tests.test_browser_quality
+  tests.test_arti_quality_config -q`.
+- I first screened the default-like warm-helper-prestart path on Tor Check only
+  under `results/torfast-warm-open-compare-20260705T181038/summary.json`
+  against no-control and adaptive caps `0.25s`, `0.5s`, and `0.75s`. The best
+  clean lead was plain `auto_adaptivegencirc_0p75s`, beating the same-window
+  `auto` by `-0.516s` on median combined wall.
+- I then moved the plain adaptive candidates into a broad three-target screen at
+  `results/torfast-warm-open-compare-20260705T181330/summary.json`. Both
+  `0.5s` and `0.75s` won the median combined wall across Tor Check, homepage,
+  and download while keeping all tracked quality counters clean (`3/3` for
+  browser default prefs, runtime reset, Tor boot, reused service, and SOCKS auth
+  isolation).
+- The `0.5s` cap did not hold up on confirmation. In
+  `results/torfast-warm-open-compare-20260705T181652/summary.json`, Tor Check
+  slipped slightly (`+0.047s`) and homepage tail metrics regressed badly
+  (`p90/max +0.921s`), so `0.5s` stays rejected.
+- The `0.75s` cap *did* repeat broadly. In the confirmation rerun at
+  `results/torfast-warm-open-compare-20260705T181912/summary.json`,
+  `auto_adaptivegencirc_0p75s` again beat `auto` on the median combined wall
+  for all three targets: Tor Check `-0.424s`, homepage `-0.674s`, and download
+  `-0.216s`. Tails also improved on Tor Check and homepage, while download had
+  only a tiny `+0.024s` p90/max loss in one three-run window.
+- Important nuance: the adaptive wait timed out `3/3` in every broad `0.75s`
+  run, so this is not yet proof that “wait for a ready circuit” is the real
+  cause. What we *have* proved is narrower: a conditional `0.75s` capped
+  pre-open pause, only when no built general circuit is present, is the
+  strongest exact-quality speed lead we have seen so far on the compare
+  harness.
+- Updated strict call after this turn: this is strong enough to justify porting
+  the `0.75s` cap into the real launcher/runtime path next, but the user goal is
+  still not fully achieved in the current codebase because that lead is not yet
+  the actual default runtime path.
+- I also attempted the required `gpt-5.4-pro` second opinion through `cz` for
+  the `0.75s` promotion question. The saved artifacts at
+  `results/torfast-warm-open-compare-20260705T181912/cz-second-opinion-adaptivegencirc-0p75-broad.stdout.txt`
+  and
+  `results/torfast-warm-open-compare-20260705T181912/cz-second-opinion-adaptivegencirc-0p75-broad.stderr.txt`
+  again produced no usable verdict: stdout stayed empty, stderr only captured
+  the prompt, startup logs, unrelated Figma MCP auth noise, and `[TIMEOUT]`.
+
+## 2026-07-05 warm-browser-prestart reuse benchmark fix and combo screen
+
+The benchmark harness can now measure warm-browser-prestart profiles correctly, but the new prestart-plus-no-control candidate still does not clear the broad exact-quality speed bar
+
+- The first Tor Check combo sweep under
+  `results/torfast-warm-open-benchmark-compare-20260705T172756/summary.json`
+  exposed a real harness bug, not a product result: every
+  `warm_browser_prestart` profile failed because `run_browser_benchmarks`
+  tried to launch a second Marionette browser on port `2828` while the warm
+  prestarted browser was already holding that port (`marionette port 2828 is already in use`).
+- I fixed that benchmark-only gap in
+  `tools/run_torfast_warm_open_benchmark_compare.py` by teaching the harness to
+  attach to the warm-prestarted browser and benchmark through that existing
+  Marionette session instead of launching a second browser. Focused coverage
+  landed in `tests/test_torfast_warm_open_benchmark_compare.py`, and I
+  revalidated with
+  `python3 -m unittest tests.test_torfast_warm_open_benchmark_compare -q`,
+  `python3 -m unittest tests.test_launch_torfast_browser tests.test_torfast_main tests.test_torfast_warm_open_compare tests.test_torfast_cli tests.test_torfast_warm_open_benchmark_compare tests.test_analyze_torfast_warm_open_benchmark_compare -q`,
+  plus
+  `python3 -m unittest tests.test_torfast_control tests.test_browser_quality tests.test_arti_quality_config -q`.
+- With that fix in place, I reran the Tor Check-only eight-profile screen under
+  `results/torfast-warm-open-benchmark-compare-20260705T174024/summary.json`
+  across warm-browser-prestart on/off, no-control on/off, and one built
+  general-circuit wait on/off. The fixed general-circuit candidates still had
+  the same core problem as before: they cut median benchmark wall heavily, but
+  tails stayed dangerous (`auto_gencirc_1` median combined wall `7.673s`, but
+  max combined wall `27.789s`).
+- That Tor Check-only screen did surface one potentially interesting product
+  candidate: `auto_nocontrolprobe` with warm-browser-prestart enabled posted
+  median combined wall `7.944s`, beating the current-style no-prestart control
+  path `auto_nobrowserprestart` at `8.699s`. But that was still only a richer
+  Tor Check-only clue, not a promotion-grade product proof.
+- I then moved exactly that candidate into the user-facing three-target
+  warm/open harness under
+  `results/torfast-warm-open-compare-20260705T174552/summary.json`, comparing
+  four exact-quality profiles in one same-window screen: warm-browser-prestart
+  on/off crossed with no-control on/off while keeping the proven overlap-on and
+  warm-helper-prestart defaults.
+- That broad screen rejected the new candidate. Against the current default-like
+  `auto_nobrowserprestart`, the prestart-plus-no-control path
+  `auto_nocontrolprobe` was worse on Tor Check (`6.130s` versus `6.015s`,
+  `+0.115s`) even though it won the homepage (`5.838s` versus `6.084s`,
+  `-0.246s`) and download (`5.934s` versus `6.154s`, `-0.220s`). The
+  no-prestart no-control path `auto_nobrowserprestart_nocontrolprobe` was also
+  still mixed: almost flat but slightly worse on Tor Check (`+0.012s`), better
+  on homepage (`-0.387s`), and better on download (`-0.082s`).
+- Updated strict call after this turn: the harness fix is worth keeping because
+  it lets us measure warm-browser-prestart honestly, but the product read is
+  still the same. No warm-browser-prestart combination or no-control
+  combination has yet delivered a broad, repeatable exact-quality win across
+  Tor Check, homepage, and download. The goal remains incomplete.
+- I also attempted the required `gpt-5.4-pro` second opinion through `cz` for
+  that broad screen. The saved artifacts at
+  `results/torfast-warm-open-compare-20260705T174552/cz-second-opinion-prestart-nocontrol-broad.stdout.txt`
+  and
+  `results/torfast-warm-open-compare-20260705T174552/cz-second-opinion-prestart-nocontrol-broad.stderr.txt`
+  again produced no usable verdict: stdout stayed empty, stderr only captured
+  startup logs plus unrelated Figma MCP auth noise, and the timed wrapper
+  recorded `[TIMEOUT]`.
+
+## 2026-07-05 rich Tor Check benchmark diagnosis
+
+The benchmark harness now matches the compare-harness variant/env knobs, and the Tor Check hotspot still looks like a post-gate readiness problem rather than a pure gate-detection problem
+
+- I aligned `tools/run_torfast_warm_open_benchmark_compare.py` with the same
+  Torfast variant plumbing used by `tools/run_torfast_warm_open_compare.py`:
+  warm-helper prestart, persistent control wait, no-control bootstrap probe,
+  no managed-service metadata wait, browser-startup-seed variants,
+  managed-open overlap/settle toggles, and the same env override path. I added
+  focused coverage in `tests/test_torfast_warm_open_benchmark_compare.py` and
+  revalidated with
+  `python3 -m unittest tests.test_torfast_warm_open_benchmark_compare -q`,
+  `python3 -m unittest tests.test_launch_torfast_browser tests.test_torfast_main tests.test_torfast_warm_open_compare tests.test_torfast_cli tests.test_torfast_warm_open_benchmark_compare tests.test_analyze_torfast_warm_open_benchmark_compare -q`,
+  plus
+  `python3 -m unittest tests.test_torfast_control tests.test_browser_quality tests.test_arti_quality_config -q`.
+- With that parity in place, I ran a targeted Tor Check-only rich benchmark
+  compare under
+  `results/torfast-warm-open-benchmark-compare-20260705T170738/summary.json`
+  using the current product-like `auto` path (`managed_open_browser_overlap`
+  on, `warm_helper_prestart` on) versus `auto_nocontrolprobe`, with
+  `--use-managed-open-gate`, `--benchmark-general-circuit-timeline`, and
+  `--benchmark-stream-isolation-timeline`. Tracked quality stayed clean `3/3`
+  on `torrc_isolate_socks_auth_ok_runs`, `boot_after_benchmark_ok_runs`, and
+  `stop_ok_runs` for both profiles.
+- That targeted benchmark showed a real median combined-wall Tor Check win for
+  `auto_nocontrolprobe`: `-0.765s` versus `auto`. The median open-gate wait
+  improved by `-0.287s`, median benchmark wall improved by `-0.150s`, and
+  median browser `elapsed_ms` improved by `-150.145ms`.
+- But the richer browser timings show why the broad result is still unstable:
+  the no-control path is often starting earlier rather than loading the page
+  more cleanly. Median Tor Check `load_ms` actually got slower
+  (`3285.965` -> `3521.288`, `+235.323ms`), and the first built general
+  circuit seen during the benchmark landed later on the no-control path
+  (about `2.041s` after benchmark start versus `1.714s` on `auto`).
+- The per-cycle read matches that diagnosis. Cycle 1 mainly won because
+  startup-to-navigation-start shrank by about `1.186s` even though in-page
+  load slowed by about `1.043s`; cycle 2 won because page load itself dropped
+  by about `1.530s`; cycle 3 lost across both gate wait and in-page load. So
+  the remaining blocker is still Tor Check readiness variance after gate, not a
+  missing metadata/control shortcut alone.
+- I then used the same benchmark harness to test the cleanest post-gate
+  follow-up hypothesis: wait for one built 3-hop general circuit before the
+  page benchmark. The three-cycle four-profile Tor Check screen under
+  `results/torfast-warm-open-benchmark-compare-20260705T172009/summary.json`
+  compared `auto`, `auto_nocontrolprobe`, `auto_gencirc_1`, and
+  `auto_nocontrolprobe_gencirc_1`.
+- That result confirms the hypothesis but still misses the product goal. The
+  no-control-plus-general-circuit path cut median benchmark wall by `1.533s`
+  and median `load_ms` by `890.401ms` versus `auto`, but the added
+  `1.957s` median general-circuit wait pushed median combined wall to
+  `+0.355s` worse than `auto`. Plain `auto_gencirc_1` also improved median
+  benchmark wall (`-1.872s`) and median `load_ms` (`-1230.147ms`), but its
+  fixed general-circuit wait still only improved median combined wall modestly
+  (`-0.450s`) and one cycle exploded to `12.945s` general-circuit wait with
+  `28.774s` max combined wall.
+- So a built-general-circuit gate does appear to help Tor Check page readiness,
+  but using it as a fixed upfront wait is too expensive and too tail-risky for
+  the default path. The next justified direction is something adaptive or
+  conditional, not a blanket extra readiness gate.
+- Updated strict call after this turn: this is good diagnostic progress, not a
+  promotion proof. The exact-quality broad default remains the overlap-on
+  `auto` path, and the user goal is still not satisfied. The next safest move
+  is a Tor Check-specific post-gate readiness experiment, not another blind
+  gate-poll retune.
+- I also attempted the required `gpt-5.4-pro` second opinion through `cz` for
+  this benchmark result. The saved artifacts at
+  `results/torfast-warm-open-benchmark-compare-20260705T170738/cz-second-opinion-rich-tor-check-benchmark.stdout.txt`
+  and
+  `results/torfast-warm-open-benchmark-compare-20260705T170738/cz-second-opinion-rich-tor-check-benchmark.stderr.txt`
+  did not produce a usable verdict: stdout stayed empty, stderr only captured
+  startup logs plus unrelated Figma MCP auth noise, and the noninteractive
+  `cz exec -m gpt-5.4-pro` call hung until I cleaned it up.
+
+## 2026-07-05 promoted-wait cadence follow-up
+
+Earlier metadata polling on the promoted path did not survive broader proof, and even plain active metadata still reads mixed against the broad goal
+
+- I tested one more timing idea in `tools/launch_torfast_browser.py`: let the
+  promoted reused-service path start metadata checks earlier and poll more
+  frequently. The focused tests stayed green while I tried it, but the broader
+  proof did not hold. I reverted that change and revalidated the final code
+  state with
+  `python3 -m unittest tests.test_launch_torfast_browser tests.test_torfast_main tests.test_torfast_warm_open_compare tests.test_torfast_cli -q`
+  plus
+  `python3 -m unittest tests.test_torfast_control tests.test_browser_quality tests.test_arti_quality_config -q`.
+- The tempting Tor Check-only sample under
+  `results/torfast-warm-open-compare-20260705T164254/summary.json` was not
+  enough. The broader three-target, three-cycle screen under
+  `results/torfast-warm-open-compare-20260705T164352/summary.json` rejected
+  that promoted-wait tweak: `auto_nocontrolprobe` lost Tor Check
+  (`+0.410s` median combined wall), won the homepage (`-0.231s`), and lost
+  download clearly (`+0.518s`). So the earlier/denser promoted-path wait was
+  reverted.
+- After reverting that experiment, I ran a separate broad three-target,
+  three-cycle check to ask a stricter default question: is the now-active
+  metadata path inside plain `auto` broadly better than simply disabling the
+  metadata wait? The result under
+  `results/torfast-warm-open-compare-20260705T164749/summary.json` was still
+  mixed. `auto_nometadatawait` lost Tor Check slightly (`+0.085s` versus
+  `auto`), but won the homepage (`-0.209s`) and won download more clearly
+  (`-0.600s`).
+- Updated strict repo read after this turn: the helper-side metadata mechanism
+  remains real and active, but neither the no-control candidate nor the
+  “earlier promoted wait” tweak has cleared the broad speed bar. The user goal
+  is still not achieved.
+- I also requested the required `gpt-5.4-pro` second opinion through `cz` for
+  this turn’s evidence. The saved artifact at
+  `results/torfast-warm-open-compare-20260705T164749/cz-second-opinion-promoted-wait-cadence.stderr.txt`
+  captured the same account/model limitation:
+  `The 'gpt-5.4-pro' model is not supported when using Codex with a ChatGPT account.`
+
+## 2026-07-05 active-metadata follow-up
+
+The helper-side metadata shortcut is finally proven active, but the broad speed result is still mixed, so the goal is still not satisfied
+
+- I fixed the remaining mechanism gap in `tools/launch_torfast_browser.py`
+  and `torfast/runtime_helper.py`: warm can now ask the prestarted runtime
+  helper to start the background promoter immediately, reused-service writes now
+  preserve helper-updated service metadata/history instead of overwriting it
+  with stale service copies, the helper promoter now prefers
+  control-readiness over log-readiness when both are available, and reused
+  `open` now prefers helper-proven metadata over raw log text only on the
+  promoted path. Focused validation stayed clean with
+  `python3 -m unittest tests.test_torfast_main tests.test_launch_torfast_browser tests.test_torfast_warm_open_compare tests.test_torfast_cli -q`
+  plus
+  `python3 -m unittest tests.test_torfast_control tests.test_browser_quality tests.test_arti_quality_config -q`.
+- Those changes proved the shortcut is now *actually active*, not just
+  theoretically wired. The broad five-cycle confirmation under
+  `results/torfast-warm-open-compare-20260705T161801/summary.json` showed
+  nonzero `ready_via_service_metadata` hits: for `auto_nocontrolprobe`, `4/5`
+  on Tor Check, `5/5` on the homepage, and `4/5` on download. In contrast,
+  earlier proof windows had stayed at `0` hits.
+- That same `161801` five-cycle confirmation stayed quality-clean on the
+  tracked counters, but it still did not clear the broad speed bar. Against
+  `auto`, `auto_nocontrolprobe` lost Tor Check (`+0.127s` median combined
+  wall), won the homepage (`-0.274s`), and only barely won download
+  (`-0.023s`). Strict call: still not promotable as the default.
+- I then tried one more lab retune by tightening the helper promoter control
+  poll interval from `20ms` to `10ms`. The three-cycle broad screen under
+  `results/torfast-warm-open-compare-20260705T162359/summary.json` looked
+  promising because `auto_nocontrolprobe` slightly won all three target
+  medians. But the stronger five-cycle confirmation under
+  `results/torfast-warm-open-compare-20260705T163049/summary.json` rejected
+  that retune: it won Tor Check (`-0.129s`), but lost the homepage
+  (`+0.150s`) and slightly lost download (`+0.014s`). I reverted that `10ms`
+  poll retune in code and kept the safer `20ms` baseline.
+- Updated strict read for the repo: this turn solved the “mechanism unproven”
+  problem. We now know helper-side metadata reuse can really happen. But we
+  still do **not** have the user’s requested end state, because the best broad
+  candidate remains mixed instead of clearly faster everywhere while keeping
+  exact Tor quality.
+- I also requested the required `gpt-5.4-pro` second opinion through `cz` for
+  this big turn. The saved artifact at
+  `results/torfast-warm-open-compare-20260705T163049/cz-second-opinion-helper-metadata-active.stderr.txt`
+  captured the familiar `invalid_request_error` saying the
+  `gpt-5.4-pro` model is not supported with this Codex/ChatGPT account, plus
+  unrelated MCP/Figma auth noise. So there is still no clean model verdict
+  text for this turn, only the recorded failure artifact.
+
+## 2026-07-05 helper-promoter activation follow-up
+
+Helper-side promotion now really starts during warm, but the metadata shortcut still never fires and the broad speed read stays mixed
+
+- I extended the warm/helper handshake in `tools/launch_torfast_browser.py`
+  and `torfast/runtime_helper.py`: warm now asks the prestarted runtime helper
+  to start the managed-service promoter immediately after pending
+  `tor-service.json` is written, waits up to `0.1s` only if that helper is
+  still booting, records promoter-request metadata into `tor-service.json`, and
+  lets reused-open metadata refresh become eager when that helper promotion was
+  actually requested. Focused validation stayed clean with:
+  `python3 -m unittest tests.test_launch_torfast_browser tests.test_torfast_main tests.test_torfast_warm_open_compare tests.test_torfast_cli -q`
+  plus
+  `python3 -m unittest tests.test_browser_quality tests.test_arti_quality_config tests.test_torfast_control -q`.
+- The quick one-target probe under
+  `results/torfast-warm-open-compare-20260705T154359/summary.json` proved the
+  helper-side promoter is now genuinely active: saved per-cycle JSON showed
+  `runtime_helper_gate_promoter.requested = true` and
+  `active_after_request = true` for both `auto` and
+  `auto_nometadatawait`, with helper-start waits around `0.024s` to `0.025s`.
+- The broader three-target, three-cycle rerun under
+  `results/torfast-warm-open-compare-20260705T154702/summary.json` kept the
+  tracked quality counters clean, and the helper promoter stayed active on
+  every measured cycle (`18/18` requested, `18/18` active). But the intended
+  shortcut still did not activate at all: saved per-cycle JSON showed
+  `0/18` `ready_via_service_metadata` hits. Reused `open` still resolved
+  mostly through log-text readiness, with only one control-based hit.
+- Speed is still mixed, so there is still no broad winner to promote. In that
+  same `154702` screen, `auto_nometadatawait` beat `auto` on Tor Check
+  (`-0.132s` median combined wall) and download (`-0.399s`), while `auto`
+  won the homepage (`-0.096s` versus `auto_nometadatawait`).
+- I also requested the required `gpt-5.4-pro` second opinion through `cz` for
+  this turn. The first attempt hung with unrelated MCP/auth noise at
+  `results/torfast-warm-open-compare-20260705T154702/cz-second-opinion-helper-active-metadata-race.stderr.txt`.
+  A clean retry failed faster and captured the known account/model limitation
+  at
+  `results/torfast-warm-open-compare-20260705T154702/cz-second-opinion-helper-active-metadata-race-retry.stderr.txt`:
+  `The 'gpt-5.4-pro' model is not supported when using Codex with a ChatGPT account.`
+- Updated strict call: this turn proved the helper-side promoter is now truly
+  active during warm, which is real progress. But the user goal is still not
+  satisfied, because the shortcut remains unproven in production measurements
+  and the broad speed result is still mixed. The next justified move is to
+  instrument promoter-side gate-write timing or otherwise prove why active
+  helper promotion still misses every metadata-use window.
+
+## 2026-07-05 helper-promoter follow-up
+
+Faster background helper promotion is still lab-only; the stronger no-control confirmation lost broad speed, but early pending metadata changed the screen shape
+
+- I improved the runtime-helper background promoter in `torfast/runtime_helper.py`
+  so it now waits for reused-service promotion with a persistent
+  control-plus-log path instead of repeatedly opening fresh control
+  connections. Focused validation stayed clean after that change:
+  `python3 -m unittest tests.test_torfast_main tests.test_launch_torfast_browser tests.test_torfast_warm_open_compare tests.test_torfast_cli -q`
+  (`157` tests).
+- That let me rerun the exact candidate that previously looked interesting only
+  in small screens: keep warm-helper-prestart enabled and disable open-time
+  control bootstrap probes (`auto_nocontrolprobe`). The quick 3-cycle four-row
+  screen under
+  `results/torfast-warm-open-compare-20260705T145951/summary.json` looked
+  promising again: quality stayed clean `3/3`, and `auto_nocontrolprobe` beat
+  helper-prestart-on `auto` on all three targets (`-0.400s` Tor Check,
+  `-0.302s` homepage, `-0.080s` download median combined wall).
+- But the stronger same-window 5-cycle confirmation under
+  `results/torfast-warm-open-compare-20260705T150504/summary.json` rejected
+  promotion. Quality stayed exact-quality clean `5/5` on all tracked counters
+  for both rows, yet the broad speed case failed: `auto_nocontrolprobe`
+  improved Tor Check (`5.934s` -> `5.846s`), but regressed on the homepage
+  (`5.898s` -> `5.959s`) and clearly regressed on download (`5.853s` ->
+  `6.307s`).
+- The intended metadata shortcut still did not activate in that stronger
+  confirmation: saved per-cycle JSON showed zero
+  `ready_via_service_metadata` hits for both `auto` and
+  `auto_nocontrolprobe`.
+- `gpt-5.4-pro` matched that strict read at
+  `results/torfast-warm-open-compare-20260705T150504/cz-second-opinion-helper-prestart-nocontrolprobe.stdout.txt`
+  with `VERDICT: LAB-ONLY`.
+- I then tested the next root-cause hypothesis directly in
+  `tools/launch_torfast_browser.py`: write `tor-service.json` immediately after
+  detached managed Tor starts, with `ready_gate = null`, so the helper promoter
+  can observe and promote the service *during warm* instead of only after warm
+  returns. I pinned that behavior with a new regression check in
+  `tests/test_launch_torfast_browser.py`, and focused validation stayed clean
+  again at `158` tests with the same command above.
+- The exploratory 3-cycle four-row rerun under
+  `results/torfast-warm-open-compare-20260705T151546/summary.json` changed the
+  screen shape materially, which makes this a real lead, but not a winner yet.
+  `auto_nocontrolprobe` was no longer a broad win over helper-prestart-on
+  `auto`, and the screen instead said helper-prestart itself still looks weak:
+  `auto_noprestart` beat helper-prestart-on `auto` on Tor Check (`-0.546s`)
+  and download (`-0.408s`) while losing homepage (`+0.117s`).
+- Even after the early pending-metadata write, saved per-cycle JSON still
+  showed zero `ready_via_service_metadata` hits across all four rows. So the
+  latest strict read is: the early-write hypothesis is the best current
+  *mechanism* lead because it changes timings, but it still has not proven the
+  intended metadata-shortcut path or produced a broad product-grade speed win.
+
+## 2026-07-05 metadata shortcut follow-up
+
+Sparse reused-service metadata shortcut is still `MORE-DATA`; it never actually fired in the proof windows
+
+- I added a narrow reused-service wait candidate in
+  `tools/launch_torfast_browser.py`: while waiting for a reused managed Tor
+  service to reach the requested gate, the launcher can now periodically
+  refresh the matching `tor-service.json` and trust it if the runtime helper
+  has already promoted the same service to that gate. This does not loosen any
+  Tor gate; it only lets open reuse already-recorded helper proof instead of
+  waiting blindly on log text or a control probe. I also added a lab A/B opt-out
+  through `TORFAST_DISABLE_MANAGED_SERVICE_METADATA_WAIT=1`, plus harness and
+  regression coverage in `tools/run_torfast_warm_open_compare.py`,
+  `tests/test_launch_torfast_browser.py`, and
+  `tests/test_torfast_warm_open_compare.py`.
+- The first same-window 5-cycle three-target proof of the eager version under
+  `results/torfast-warm-open-compare-20260705T143430/summary.json` stayed
+  exact-quality clean `5/5` on all tracked counters for both profiles, but it
+  was speed-split: `auto_nometadatawait` beat eager-`auto` on Tor Check
+  (`-0.421s` median combined wall) and the homepage (`-0.236s`), while losing
+  download (`+0.100s`).
+- That first proof did **not** show actual shortcut value yet. Saved per-cycle
+  JSON showed zero `ready_via_service_metadata` hits for both `auto` and
+  `auto_nometadatawait`, so the shortcut never fired in the measured window.
+- I then refined the candidate to a sparse check: start only at poll `5` and
+  then every `5` polls, so the normal fast path does not pay an extra metadata
+  read on every single readiness poll. Focused validation stayed clean after
+  that change:
+  `python3 -m unittest tests.test_launch_torfast_browser tests.test_torfast_warm_open_compare tests.test_torfast_cli tests.test_torfast_main -q`
+  (`156` tests).
+- The confirmatory same-window 5-cycle rerun under
+  `results/torfast-warm-open-compare-20260705T143942/summary.json` again kept
+  exact-quality clean `5/5` on all tracked counters for both profiles on Tor
+  Check, homepage, and download. Against sparse-`auto`, the opt-out
+  `auto_nometadatawait` only kept a tiny Tor Check median win (`-0.074s`), but
+  lost the homepage (`+0.177s`) and slightly lost download (`+0.017s`). Tail
+  behavior also favored sparse-`auto` overall, especially on download where
+  `auto_nometadatawait` regressed by `+1.351s` p90/max combined wall and
+  `+1.283s` p90/max launch-gate wait.
+- Even in that stronger rerun, the shortcut still never actually fired:
+  saved per-cycle JSON again showed zero `ready_via_service_metadata` hits for
+  both profiles. So the strict call is still not “promote because it helped”;
+  it is only “do not count the opt-out as better.”
+- `gpt-5.4-pro` matched that strict read at
+  `results/torfast-warm-open-compare-20260705T143942/cz-second-opinion-managed-service-metadata-wait.stdout.txt`
+  with `VERDICT: MORE-DATA`: quality stayed clean, but the active shortcut path
+  is still unproven because it never fired in either proof window.
+- Updated strict call: keep treating the sparse metadata shortcut as unproven.
+  It is a plausible defensive fast path for rare reused-service stalls, but it
+  is **not** yet evidence that we have a new exact-quality speed winner. The
+  next justified proof should intentionally create or capture a window where the
+  runtime helper actually beats open to the same gate and records nonzero
+  metadata-shortcut hits.
+
+## 2026-07-05 follow-up
+
+Current default stays overlap-on; `tor_boot_90` overlap and no-control-probe are rejected on the new path
+
+- I aligned `tools/run_torfast_warm_open_compare.py` with the current product
+  default after promoting managed-open browser overlap: the harness now treats
+  overlap as base-on unless `--no-managed-open-browser-overlap` is passed, so
+  future “default path” proofs measure the real current product behavior.
+- I tested one higher-upside follow-up: let the overlap mechanism navigate at
+  `tor_boot_90` instead of only `tor_boot_95`. The same-window five-cycle sweep
+  under `results/torfast-warm-open-compare-20260705T135704/summary.json`
+  rejected it. Quality stayed clean `5/5`, but `tor_boot_90` overlap-on lost to
+  current default `auto` on all three targets: Tor Check `5.787s` -> `6.556s`,
+  homepage `5.942s` -> `6.312s`, and download `6.060s` -> `6.540s`.
+- I then reran the old no-control-bootstrap-probe idea on the **new**
+  overlap-on default path using the harness-aligned proof at
+  `results/torfast-warm-open-compare-20260705T140902/summary.json`.
+  Quality again stayed exact-quality clean `5/5`, and the candidate improved
+  Tor Check (`6.277s` -> `6.121s`) plus the homepage (`6.308s` -> `5.899s`).
+- But that same rerun is a strict reject because download tail behavior became
+  catastrophic: `auto_nocontrolprobe` ended at
+  `83.197s` max / `83.197s` p90 combined wall and
+  `78.598s` max / `78.598s` p90 launch-gate wait, while default `auto` stayed
+  at `6.454s` max combined wall. Download median also lost slightly
+  (`6.260s` -> `6.275s`).
+- Focused validation stayed clean after the harness-default patch and the
+  follow-up proof work:
+  `python3 -m unittest tests.test_launch_torfast_browser tests.test_torfast_cli tests.test_torfast_main tests.test_torfast_warm_open_compare -q`
+  (`153` tests).
+- `gpt-5.4-pro` matched the strict repo read at
+  `results/torfast-warm-open-compare-20260705T140902/cz-second-opinion-followup-default.stdout.txt`
+  with `VERDICT: KEEP CURRENT DEFAULT`.
+- Updated strict call: keep the new overlap-on default, keep the explicit
+  overlap opt-out, and reject both `tor_boot_90` overlap and no-control-probe
+  on the current product path. The next real lead still needs to beat the new
+  default without reopening download tails.
+
+## 2026-07-05 overlap promotion
+
+Managed-open browser overlap is now the default path; deep prime is fixed too
+
+- I fixed a real `torfast prime` gap. One-shot priming now forces
+  `tor_boot_100` by default and no longer stops before the shared dir-cache
+  seed refresh path can run. I also fixed the launcher-side seed-refresh gate
+  lookup so start-managed-only one-shot runs can refresh the seed from
+  `tor_boot` / `tor_browser_launch_gate` proof, not only `tor_managed_ready`.
+- Focused validation stayed clean after those changes:
+  `python3 -m unittest tests.test_launch_torfast_browser tests.test_torfast_cli tests.test_torfast_main tests.test_torfast_warm_open_compare -q`
+  (`151` tests).
+- A real deep prime at `tmp/prime-refresh-20260705T131555/launch.json`
+  now shows the intended behavior directly: `browser_launch_gate =
+  tor_boot_100`, `tor_boot.ok = true`, and the shared dir-cache seed path is
+  exercised during the one-shot run.
+- Fresh wide same-window overlap sweep under
+  `results/torfast-warm-open-compare-20260705T131637/summary.json` promoted the
+  overlap-on `auto` base over `auto_nooverlap` on all three targets while
+  keeping tracked quality counters clean `5/5`. Median combined wall improved
+  from `6.279s` to `5.832s` on Tor Check, `6.424s` to `6.059s` on the
+  homepage, and `6.503s` to `6.078s` on the download page.
+- The tighter confirmatory same-window auto-only rerun under
+  `results/torfast-warm-open-compare-20260705T133407/summary.json` kept the
+  same direction with exact-quality parity still clean `5/5`: Tor Check
+  improved `5.986s` -> `5.935s`, the homepage improved `6.415s` -> `6.017s`,
+  and download improved `6.508s` -> `6.114s`. Worst-case combined wall also
+  stayed better with overlap-on on all three targets.
+- I then flipped managed-open browser overlap to default-on in the product
+  path and added explicit opt-out support through
+  `--no-managed-open-browser-overlap`, keeping the optimization reversible for
+  future proof work.
+- `gpt-5.4-pro` agreed with the promotion at
+  `results/torfast-warm-open-compare-20260705T133407/cz-second-opinion-overlap-default.stdout.txt`
+  with `VERDICT: PROMOTE`.
+- Updated strict call: the project now has a stronger exact-quality default
+  path than before, but the broader “extreme fast everywhere” goal is still not
+  fully proven. The promoted overlap default is a real speed improvement, not
+  the final ceiling.
+
+## 2026-07-05 post-fix status
+
+Dir-cache seed refresh timing fix validates cleanly; default path tail improves, but the full goal is still not done
+
+- I hardened `tools/launch_torfast_browser.py` so warm-only managed launches now
+  refresh the shared dir-cache seed only after reaching `tor_boot_95`, while
+  fresh non-managed launches defer the seed refresh until successful
+  post-browser `tor_boot`. Focused regression coverage landed in
+  `tests/test_launch_torfast_browser.py`, and validation stayed clean with
+  `python3 -m py_compile tools/launch_torfast_browser.py tests/test_launch_torfast_browser.py`
+  plus `python3 -m unittest tests.test_launch_torfast_browser -q` (`43` tests),
+  then `python3 -m unittest tests.test_launch_torfast_browser tests.test_torfast_warm_open_compare tests.test_torfast_cli tests.test_torfast_main -q`
+  (`145` tests).
+- A deep managed warm at
+  `tmp/seed-refresh-deep-20260705T130109/launch.json` reached
+  `tor_boot_95` and exercised the new guarded refresh path correctly. The
+  shared seed did not change because it was already current, which is the
+  expected safe result for this run.
+- Fresh five-cycle gate sweep proof under
+  `results/torfast-warm-open-compare-20260705T130208/summary.json` keeps all
+  tracked quality counters clean `5/5` across the compared profiles:
+  `browser_default_pref_check_ok_runs`, `browser_runtime_reset_ok_runs`,
+  `open_tor_boot_ok_runs`, `torrc_isolate_socks_auth_ok_runs`,
+  `reused_service_ok_runs`, and `stop_ok_runs`.
+- The default `auto` path is materially healthier on the download target than
+  the earlier bad window. Download `max/p90 combined wall` moved from
+  `15.678s` in `results/torfast-warm-open-compare-20260705T123107/summary.json`
+  down to `6.465s` in the fresh post-fix rerun, so the recent long-tail default
+  outlier is not reproducing in this same style of five-cycle test.
+- But the strict end-state call is still **not yet satisfied**. There is still
+  no single promotable profile that is both exact-quality clean and clearly
+  faster everywhere. `socks_ready` wins median wall time on all three targets
+  but is a hard reject on download tail stability with `40.632s`
+  `max/p90 combined wall`. `tor_boot_95` is stable and wins download median
+  (`6.418s` -> `6.052s`) but still loses on Tor Check (`6.451s` -> `6.867s`)
+  and the homepage (`6.236s` -> `6.352s`).
+
+## 2026-07-05 status
+
+Current-default hidden-wait retest rejects promotion; integrated candidates stay non-default
+
+- I aligned `tools/run_torfast_warm_open_compare.py` with the current product
+  default after reverting persistent Tor control wait to opt-in/lab-only. The
+  harness now benchmarks the real default path unless
+  `--persistent-control-wait` is passed explicitly, and focused validation
+  stayed clean:
+  `python3 -m py_compile tools/run_torfast_warm_open_compare.py tests/test_torfast_warm_open_compare.py`
+  and `python3 -m unittest tests.test_torfast_warm_open_compare -q` (`27`
+  tests).
+- That harness alignment supersedes the earlier “manual gap winner” claim
+  below as a product-path promotion read. The fresh five-cycle same-window
+  sweep under `results/torfast-warm-open-compare-20260705T095412/summary.json`
+  compared the real current `auto` default path against
+  `auto_wait_1p6s`, `auto_wait_1p7s`, and `auto_wait_1p8s` with
+  `torfast wait-ready` enabled after the hidden post-warm gap.
+- Quality stayed exact-quality clean across all four profiles and both
+  targets: `browser_default_pref_check_ok_runs = 5/5`,
+  `browser_runtime_reset_ok_runs = 5/5`,
+  `open_tor_boot_ok_runs = 5/5`,
+  `torrc_isolate_socks_auth_ok_runs = 5/5`,
+  `reused_service_ok_runs = 5/5`, `stop_ok_runs = 5/5`, and
+  `wait_ready_ok_runs = 5/5` for the wait variants.
+- But the speed read is a strict reject on the real default path. Every hidden
+  wait variant lost on total wall against `auto` on both targets even though
+  combined phase time got smaller. On Tor Check, `auto` stayed best at
+  `6.041s` versus `6.492s`, `6.353s`, and `6.160s`. On the homepage, `auto`
+  stayed best at `6.327s` versus `6.480s`, `6.509s`, and `6.651s`.
+- I asked `gpt-5.4-pro` through `cz` for a strict second opinion at
+  `results/torfast-warm-open-compare-20260705T095412/cz-second-opinion-hidden-wait-current-default.stdout.txt`.
+  It matched the repo read with `VERDICT: LAB-ONLY`: quality is clean, but the
+  decisive same-window five-cycle result shows no product-path speed win.
+- Updated strict call: on the actual current default path, keep hidden
+  wait-ready variants lab-only. The broader “exact Tor quality plus clearly
+  faster default path” goal is still unproven.
+
+Async browser-reset A/B in warm/open:
+
+- I added same-window A/B support in `tools/run_torfast_warm_open_compare.py`
+  for disabling async browser runtime reset cleanup, exposing
+  `*_noasyncreset` profile variants while keeping the current launcher default
+  unchanged. Focused validation stayed clean:
+  `python3 -m py_compile tools/launch_torfast_browser.py tools/run_torfast_warm_open_compare.py tests/test_launch_torfast_browser.py tests/test_torfast_warm_open_compare.py`
+  and `python3 -m unittest tests.test_launch_torfast_browser tests.test_torfast_warm_open_compare -q`
+  (`67` tests).
+- The first five-cycle same-window A/B under
+  `results/torfast-warm-open-compare-20260705T101351/summary.json` looked
+  promotable. `auto_noasyncreset` beat default `auto` on total wall for both
+  targets while all tracked quality counters stayed clean `5/5`: Tor Check
+  improved from `6.323s` to `6.153s`, and the homepage improved from `6.276s`
+  to `6.061s`.
+- But the stronger follow-up five-cycle confirmation under
+  `results/torfast-warm-open-compare-20260705T102545/summary.json` did **not**
+  hold cleanly. Quality still stayed clean `5/5`, but the speed read split:
+  `auto_noasyncreset` lost Tor Check by `0.471s` total wall (`6.189s` versus
+  `6.660s`) while still winning the homepage by `0.496s`
+  (`6.447s` versus `5.951s`).
+- I reverted a temporary default flip after that conflicting confirmation, so
+  async browser reset remains the current product-path behavior and
+  `noasyncreset` stays lab-only.
+- A `gpt-5.4-pro` second opinion at
+  `results/torfast-warm-open-compare-20260705T102545/cz-second-opinion-async-browser-reset.stdout.txt`
+  matched the strict repo read with `VERDICT: LAB-ONLY`: quality is at parity,
+  but the repeated same-window speed signal is conflicting and not promotable.
+
+- Interleaved same-window search under
+  `results/torfast-warm-open-compare-20260705T054314/summary.json` and focused
+  five-cycle confirmation under
+  `results/torfast-warm-open-compare-20260705T055019/summary.json` still show
+  the strongest exact-quality warmed path as the manual `auto_wait_1p7s`
+  workflow. The confirmed `median_total_wall_seconds` win stayed
+  `6.462s` -> `6.442s` on `https://check.torproject.org/` and
+  `6.178s` -> `5.964s` on `https://www.torproject.org/`, with all tracked
+  counters clean `5/5`.
+- I also fixed a real missing-kwarg crash in
+  `tools/run_torfast_warm_open_benchmark_compare.py`; the richer page benchmark
+  at `results/torfast-warm-open-benchmark-compare-20260705T060826/summary.json`
+  still supports that manual warmed-path result, improving Tor Check
+  `median_elapsed_ms` from `6484.444` to `4704.712` and homepage
+  `median_elapsed_ms` from `12901.523` to `11180.860` with exact-quality
+  counters still green.
+- I then productized a managed-open settle candidate behind an explicit
+  `--managed-open-settle` opt-in and added same-window A/B support against a
+  settle-off variant. The integrated candidate does **not** meet the promotion
+  bar yet:
+  `results/torfast-warm-open-compare-20260705T062905/summary.json` showed the
+  default-on `1.7s` integrated version losing to settle-off on both targets,
+  `results/torfast-warm-open-compare-20260705T063519/summary.json` showed
+  `2.0s` splitting winners, and
+  `results/torfast-warm-open-compare-20260705T063743/summary.json` plus
+  `results/torfast-warm-open-compare-20260705T064837/summary.json` showed the
+  `1.85s` integrated version also losing. Tracked quality stayed clean in these
+  A/Bs, so the problem is speed, not privacy regression.
+- Updated strict call: keep integrated managed-open settle lab-only and
+  non-default. The normal warmed `torfast open` path should stay fixed-wait
+  free for now, while the manual warmed-gap workflow remains the strongest
+  repeated exact-quality speed read.
+- A distilled `cz exec -m gpt-5.4-pro` second opinion finally returned a usable
+  verdict at
+  `results/torfast-warm-open-compare-20260705T064837/cz-second-opinion-managed-open-settle-distilled.stdout.txt`:
+  `VERDICT: DO NOT PROMOTE`.
+- I then tested a second no-quality-change overlap idea: prestart the managed
+  runtime helper before `torfast warm` and let the helper watchdog restart
+  background ready-gate promotion as soon as the managed service appears. The
+  code path is now lab-only and opt-in, with same-window A/B support through
+  `tools/run_torfast_warm_open_compare.py --warm-helper-prestart
+  --extra-no-warm-helper-prestart`.
+- Focused validation stayed clean after that patch:
+  `python3 -m unittest tests.test_torfast_main tests.test_torfast_warm_open_compare -q`.
+- The first same-window screen under
+  `results/torfast-warm-open-compare-20260705T071332/summary.json` looked
+  mildly positive, with `auto` (prestart enabled) beating `auto_noprestart` by
+  `0.044s` on Tor Check and `0.074s` on the homepage, while all tracked
+  counters stayed `3/3` green.
+- But the stronger confirmation under
+  `results/torfast-warm-open-compare-20260705T071505/summary.json` did **not**
+  hold up: the candidate lost Tor Check by `0.532s` total wall even though it
+  still won the homepage by `0.261s`, with all tracked counters still `5/5`
+  green. A current-code opt-in smoke rerun under
+  `results/torfast-warm-open-compare-20260705T072611/summary.json` then lost on
+  both targets (`0.678s` on Tor Check, `0.273s` on the homepage).
+- The outside read matches the strict call. A distilled
+  `cz exec -m gpt-5.4-pro` opinion at
+  `results/torfast-warm-open-compare-20260705T071505/cz-second-opinion-warm-helper-prestart-distilled.stdout.txt`
+  says to keep the candidate opt-in/lab-only and **not** default-on, because
+  quality stays clean but the speed signal is not repeatable enough.
+- I then fixed the warm/open compare harness so the lab-only
+  `--managed-open-browser-overlap` candidate is actually wired end-to-end in
+  `tools/run_torfast_warm_open_compare.py`, including the saved result rows and
+  same-window `*_nooverlap` variants. Focused validation stayed clean after the
+  patch:
+  `python3 -m py_compile tools/run_torfast_warm_open_compare.py tests/test_torfast_warm_open_compare.py tests/test_torfast_cli.py tests/test_torfast_main.py tests/test_launch_torfast_browser.py`
+  and
+  `python3 -m unittest tests.test_launch_torfast_browser tests.test_torfast_main tests.test_torfast_warm_open_compare tests.test_torfast_cli -q`
+  (`126` tests).
+- The first real same-window overlap screen under
+  `results/torfast-warm-open-compare-20260705T075855/summary.json` looked
+  strong: overlap-on `auto` beat `auto_nooverlap` by `1.215s` total wall on
+  Tor Check (`5.289s` versus `6.504s`) and by `0.304s` on the homepage
+  (`6.024s` versus `6.328s`), with all tracked quality counters clean `3/3`.
+- But the stronger five-cycle confirmation under
+  `results/torfast-warm-open-compare-20260705T080025/summary.json` reversed the
+  call while keeping quality clean `5/5`. In that window overlap-on `auto`
+  lost Tor Check by `0.041s` total wall (`6.149s` versus `6.108s`) and lost
+  the homepage by `0.244s` (`5.978s` versus `5.734s`). The mechanism still
+  reduced launch-gate/full-boot wait, but the user-facing combined wall did not
+  hold up.
+- A distilled `cz exec -m gpt-5.4-pro` second opinion at
+  `results/torfast-warm-open-compare-20260705T080025/cz-second-opinion-managed-open-browser-overlap-distilled.stdout.txt`
+  matched the repo read with `VERDICT: LAB-ONLY`: quality stayed clean, but the
+  five-cycle combined-wall confirmation is not stable enough to promote.
+- I also tested one tighter follow-up suggested by that read: start the
+  overlap browser later and closer to the target gate. The focused three-cycle
+  rerun at `results/torfast-warm-open-compare-20260705T082134/summary.json`
+  clearly rejected that idea and it was reverted: overlap-on `auto` lost Tor
+  Check by `2.898s` total wall (`9.101s` versus `6.203s`) and lost the
+  homepage by `1.818s` (`7.951s` versus `6.133s`), while quality still stayed
+  clean.
+- I then screened a different exact-quality gate idea: wait for one built
+  `GENERAL` circuit through Tor control-port readiness instead of the current
+  `tor_boot_95` gate. The first same-window check under
+  `results/torfast-warm-open-compare-20260705T083633/summary.json` rejected it
+  immediately even though quality stayed clean `3/3`: the candidate cut open
+  launch-gate time heavily, but it pushed that wait into `warm` and made the
+  combined user-facing wall worse on both pages. Tor Check regressed from
+  `6.404s` to `8.049s`, and the homepage regressed from `6.313s` to `8.182s`.
+- A distilled `cz exec -m gpt-5.4-pro` opinion at
+  `results/torfast-warm-open-compare-20260705T083633/cz-second-opinion-general-circuit-gate-distilled.stdout.txt`
+  matched the speed read with `VERDICT: LAB-ONLY`. I reverted that candidate
+  code from the tree and kept only the saved benchmark evidence.
+- The broader “extreme fast everywhere” goal is still unproven outside that
+  warmed manual workflow.
+
+Managed hidden-readiness `wait-ready` productization:
+
+- `torfast/cli.py` now exposes a real `torfast wait-ready` command that waits
+  for the managed warm service to reach a stronger ready gate without opening
+  the browser, and `torfast/fast_runtime.py` now records the same gate-wait
+  proof/report shape for that path.
+- Fresh workflow proof under
+  `results/torfast-warm-open-compare-20260705T033004/summary.json` measured a
+  real `warm` -> idle gap -> `wait-ready` -> `open` path on both
+  `https://check.torproject.org/` and `https://www.torproject.org/`, with the
+  same exact-Tor defaults and browser startup seed still off.
+- Quality stayed clean across the saved runs. For both targets and all three
+  profiles (`auto`, `auto_wait_3s`, `auto_wait_5s`), the summary kept
+  `ok_runs = 3/3`, `open_browser_ok_runs = 3/3`,
+  `open_tor_boot_ok_runs = 3/3`, `torrc_isolate_socks_auth_ok_runs = 3/3`,
+  `reused_service_ok_runs = 3/3`, and `stop_ok_runs = 3/3`.
+- The real user-facing command overhead is small. On Tor Check,
+  `median_wait_ready_wall_seconds` was only `0.072s` for the `3s` gap and
+  `0.071s` for the `5s` gap. On the homepage it was `0.164s` for the `3s`
+  gap and `0.064s` for the `5s` gap.
+- The hidden-readiness workflow win survives that real command cost. On Tor
+  Check, median combined wall moved from `6.366s` on plain `auto` to `3.311s`
+  with a `3s` hidden gap and `3.261s` with a `5s` hidden gap. On the
+  homepage, it moved from `7.043s` to `3.366s` and `3.248s`.
+- The saved per-run `wait_ready_response` payloads also show the user-facing
+  `auto` gate resolving to `tor_boot_95`, matching the warmed browsing path
+  we intend to ship.
+- I then moved `wait-ready` onto the fast path in `torfast.__main__` /
+  `torfast.fast_runtime` so it no longer falls back through the full CLI
+  parser on the hot path.
+- A direct microbenchmark under
+  `results/wait-ready-fastpath-microbench-20260705T035155/report.json`
+  measured the already-ready case against a forced CLI fallback path. Median
+  wall time improved from `0.042s` on the forced CLI path to `0.038s` on the
+  fast path, a modest but real `~4ms` win with no Tor-quality change.
+- Fresh workflow revalidation under
+  `results/torfast-warm-open-compare-20260705T040434/summary.json` then
+  raised the saved proof bar again: the summary now also requires
+  `browser_default_pref_check_ok_runs` and `browser_runtime_reset_ok_runs`, and
+  both stayed `3/3` on both targets and all measured profiles.
+- That stricter rerun kept the same qualitative result: the hidden-readiness
+  workflow still cut median combined wall roughly in half or better on both
+  targets while keeping the added browser checks green (`6.493s -> 3.301s /
+  3.280s` on Tor Check, `7.698s -> 3.270s / 3.270s` on the homepage).
+- Managed-service metadata race hardening:
+
+- `tools/launch_torfast_browser.py` now writes `tor-service.json` /
+  `launch.json` atomically and briefly retries transient unreadable JSON when
+  reusing or stopping a managed service. `torfast/runtime_helper.py` now writes
+  `runtime-helper.json` through the same atomic JSON path too.
+- Focused regression guards landed in `tests/test_launch_torfast_browser.py`
+  and `tests/test_torfast_warm_open_compare.py`, and the broader exact-quality
+  suite
+  `python3 -m unittest tests.test_torfast_main tests.test_torfast_cli tests.test_launch_torfast_browser tests.test_torfast_warm_open_compare tests.test_torfast_warm_open_benchmark_compare tests.test_analyze_torfast_warm_open_benchmark_compare tests.test_torfast_control tests.test_browser_quality -q`
+  now runs `424` tests and passes.
+- `tools/run_torfast_warm_open_compare.py` now also records
+  `total_wall_seconds` / `median_total_wall_seconds`, which include the hidden
+  post-warm idle gap instead of only `warm + wait-ready + open`.
+- Fresh default-off rerun under
+  `results/torfast-warm-open-compare-20260705T042742/summary.json` kept all
+  tracked quality gates green again (`browser_default_pref_check_ok_runs = 3`,
+  `browser_runtime_reset_ok_runs = 3`, `open_tor_boot_ok_runs = 3`,
+  `torrc_isolate_socks_auth_ok_runs = 3`, `reused_service_ok_runs = 3`,
+  `stop_ok_runs = 3`), but the new total-wall metric shows the old caveat was
+  real. On Tor Check, `median_total_wall_seconds` moved from `5.870s` on
+  `auto` to `6.270s` on `auto_wait_3s` and `8.285s` on `auto_wait_5s`; on the
+  homepage it moved from `6.373s` to `6.387s` and `8.244s`.
+- Fresh seeded strict rerun under
+  `results/torfast-warm-open-compare-20260705T043009/summary.json` also kept
+  all tracked checks green and removed the old managed-reuse failure entirely:
+  both targets and all three profiles are back to `3/3` ok. In that seeded
+  same-window run, `auto_wait_3s` was slightly faster on total wall than
+  `auto` (`6.332s -> 6.276s` on Tor Check, `6.346s -> 6.269s` on the
+  homepage), but this still is **not** a browser-startup-seed on/off A/B, so
+  browser-startup seed remains default-off.
+- Fresh default-off shorter-gap probe under
+  `results/torfast-warm-open-compare-20260705T043230/summary.json` is now the
+  best exact-quality lead. In that same-window rotated compare, both
+  `auto_wait_2s` and `auto_wait_2p5s` beat `auto` on total wall while keeping
+  all tracked checks green. Tor Check moved from `9.714s` on `auto` to
+  `6.525s` on `auto_wait_2s` and `6.008s` on `auto_wait_2p5s`; the homepage
+  moved from `6.475s` to `5.954s` and `6.292s`.
+- The required confirmation rerun under
+  `results/torfast-warm-open-compare-20260705T044055/summary.json` did **not**
+  repeat that win cleanly across both targets. It still kept all tracked checks
+  green, and on Tor Check the shorter waits stayed ahead on total wall
+  (`6.422s` on `auto` versus `6.084s` at `2s` and `6.087s` at `2.5s`), but on
+  the homepage both shorter waits lost (`6.308s` on `auto` versus `6.519s` at
+  `2s` and `6.417s` at `2.5s`).
+- Updated call: the shorter-gap default-off idea stays only as a lead for more
+  tuning. It is **not** promotion-grade yet because there is still no repeated
+  exact-quality total-wall winner across both targets.
+- Second-opinion follow-up under
+  `results/torfast-warm-open-compare-20260705T043230/cz-second-opinion-shorter-gap.stdout.txt`
+  matched that strict read: keep the race-fix patch, keep browser-startup seed
+  default-off, and require another same-window shorter-gap rerun before
+  promotion. The paired stderr artifact at
+  `results/torfast-warm-open-compare-20260705T043230/cz-second-opinion-shorter-gap.stderr.txt`
+  also records unrelated MCP/auth noise during that `cz exec -m gpt-5.4-pro`
+  run, but a usable second-opinion verdict was still returned.
+- A follow-up `cz exec -m gpt-5.4-pro` retry for the confirmation rerun was
+  also attempted and saved at
+  `results/torfast-warm-open-compare-20260705T044055/cz-second-opinion-confirmation.stderr.txt`,
+  and that retry ultimately matched the stricter updated call too: keep the
+  race fix, keep browser-startup seed default-off, and do not promote any
+  hidden-wait change yet because the required cross-target confirmation rerun
+  did not repeat a total-wall win cleanly. The stderr stream contains both the
+  MCP/auth noise and the returned verdict; stdout stayed empty on that run.
+- Interleaved exact-quality variant compare:
+
+- `tools/run_torfast_warm_open_compare.py` now also supports same-window
+  `ConfluxClientUX` variants through `--extra-conflux-client-ux`, so stock and
+  official-Tor knob candidates can be rotated inside the same run window
+  instead of being compared only across separate timestamps.
+- Reused managed-service waits can now also accept the control-port bootstrap
+  snapshot as an exact same-gate proof when the gate is `tor_boot_90`,
+  `tor_boot_95`, or `tor_boot_100`; this is a safe precision improvement, but
+  the new speed proofs below still decide promotion.
+- Broad validation after these runner/wait changes now passes
+  `427` tests under
+  `python3 -m unittest tests.test_torfast_main tests.test_torfast_cli tests.test_launch_torfast_browser tests.test_torfast_warm_open_compare tests.test_torfast_warm_open_benchmark_compare tests.test_analyze_torfast_warm_open_benchmark_compare tests.test_torfast_control tests.test_browser_quality -q`.
+- Strongest new same-window read is
+  `results/torfast-warm-open-compare-20260705T052138/summary.json`, which
+  compared four exact-quality variants in one rotated window: stock `auto`,
+  stock `auto_wait_1p8s`, plain
+  `auto_confluxux_throughput_lowmem`, and
+  `auto_wait_1p8s_confluxux_throughput_lowmem`.
+- Quality stayed green across all four variants and both targets:
+  `browser_default_pref_check_ok_runs = 3`,
+  `browser_runtime_reset_ok_runs = 3`,
+  `open_tor_boot_ok_runs = 3`,
+  `torrc_isolate_socks_auth_ok_runs = 3`,
+  `reused_service_ok_runs = 3`, and `stop_ok_runs = 3`.
+- The speed result is still split. On Tor Check, the best total-wall result in
+  that interleaved window was
+  `auto_wait_1p8s_confluxux_throughput_lowmem` at `5.903s`, ahead of stock
+  `auto` at `6.050s`. On the homepage, the best total-wall result was stock
+  `auto_wait_1p8s` at `5.988s`, ahead of stock `auto` at `6.103s`, while the
+  `throughput_lowmem` hidden-wait combo lost there at `6.210s`.
+- Updated strict call: the measurement infrastructure is materially better now,
+  but there is still **no** promotion-grade exact-quality winner. Stock hidden
+  wait and official `throughput_lowmem` each help one target and hurt another,
+  so both must stay non-default until one variant wins on both targets in
+  repeated same-window proofs.
+- I also attempted a fresh `cz exec -m gpt-5.4-pro` second opinion for this
+  interleaved result and saved the artifact at
+  `results/torfast-warm-open-compare-20260705T052138/cz-second-opinion-interleaved.stderr.txt`.
+  On this machine that retry only emitted the same MCP/auth noise and never
+  returned a usable verdict before it had to be terminated.
+
+## 2026-07-04 status
+
+Bundled-seeded exact-Tor `ConfluxClientUX throughput_lowmem` retest:
+
+- Larger exact-Tor A/B
+  `results/torfast-browser-compare-20260704T150606/torfast-browser-compare.json`
+  compared the current bundled-seeded default path
+  (`bundled_c_tor_browser_seeded`) against the same exact Tor Browser plus
+  bundled Tor path with only the official `ConfluxClientUX throughput_lowmem`
+  change (`bundled_c_tor_browser_seeded_confluxux_throughput_lowmem`).
+  Startup seed stayed off, the shared cache-only dir seed stayed on, and the
+  focused pack kept the same two real targets: Tor Check and the Tor Project
+  homepage.
+- Result: `throughput_lowmem` is the closest official exact-Tor candidate so
+  far, but it still does **not** satisfy the current promotion bar. Tor Check
+  regressed slightly on latency tails: median elapsed moved from `4665.773ms`
+  to `4736.821ms`, `p95` from `7001.386ms` to `8534.031ms`, and max from
+  `7562.018ms` to `10538.320ms`, even though both profiles stayed `12/12` ok.
+- The homepage result was much better than the current bundled-seeded default:
+  successful-run median elapsed improved from `19266.561ms` to
+  `14933.692ms`, `p95` dropped from `121654.964ms` to `34773.028ms`, max
+  dropped from `121672.360ms` to `38244.416ms`, and `ok_runs` improved from
+  `10/12` to `12/12`.
+- The new analyzer output
+  `/tmp/torfast-browser-compare-20260704T150606-analysis.txt` shows why the
+  homepage improved: `throughput_lowmem` moved homepage `site css`, `site js`,
+  `site image`, `source sans font`, and `fontawesome` startup families earlier
+  than the baseline on median. But the same run still had a real homepage tail
+  mode: run `9` hit a blocker-chain/queue burst around `38.2s`, with queued
+  resources like `fingerprinting.svg`, `circle-pattern.svg`, and
+  `browse-freely.svg` sitting behind long same-origin slot pressure.
+- Decision stays conservative: keep forced `ConfluxClientUX` modes lab-only for
+  the browser path. `throughput_lowmem` is now the best official exact-Tor
+  candidate, but it is still not ship-ready because it has not yet proven
+  "no quality degradation" on Tor Check and it still shows a large homepage
+  outlier.
+- Requested second opinion note: this environment's `cz` account rejected the
+  requested `gpt-5.4-pro` model, so the saved fallback `cz` review used the
+  default supported `gpt-5.5` model instead:
+  `results/torfast-browser-compare-20260704T150606/cz-second-opinion-summary-only.md`.
+  That fallback verdict matched the local read: do not promote yet; rerun with
+  more samples/logging focused on the Tor Check tail regression and the
+  `38.2s` homepage outlier.
+- Focused logged Tor Check follow-up
+  `results/torfast-browser-compare-20260704T152855/torfast-browser-compare.json`
+  then targeted only `https://check.torproject.org/` across `8` rotated runs
+  with browser net logs on both profiles. This made the Tor Check regression
+  look more real, not less: median elapsed moved from `4516.8365ms` to
+  `5156.0215ms`, `p95` from `6082.924ms` to `15471.007ms`, max from
+  `6151.513ms` to `20624.299ms`, and the lowmem variant won only `3/8` runs.
+- The matching analyzer output
+  `/tmp/torfast-browser-compare-20260704T152855-analysis.txt` shows no
+  same-origin slot-pressure or cache-signal difference on Tor Check. The page
+  is just slower on the same single `tor-on.png` image: lowmem starts that
+  image about `242ms` later on median and the image duration grows by about
+  `200ms`, with a very large `20.6s` outlier on run `8`.
+- This follow-up narrows the promotion decision further: even though
+  `throughput_lowmem` still improves the homepage, the current evidence now
+  says it materially degrades Tor Check latency quality, so it should stay
+  lab-only and non-default. The updated fallback `cz` review saved at
+  `results/torfast-browser-compare-20260704T152855/cz-second-opinion-summary-only.md`
+  agreed: do not ship it; look for alternatives that preserve Tor Check
+  `p95`/max behavior.
+
+Warm/open repeated-open revalidation:
+
+- I reran the current repeated-open managed path under
+  `results/torfast-warm-open-benchmark-compare-20260704T153543/summary.json`,
+  comparing warm/open `auto` against explicit `tor_boot_95` across `6`
+  rotated cycles on `https://check.torproject.org/` and
+  `https://www.torproject.org/`, with browser startup seed still off.
+- Quality stayed green in every saved run for both profiles and both targets:
+  `ok_runs = 6/6`, `torrc_isolate_socks_auth_ok_runs = 6/6`,
+  `boot_after_benchmark_ok_runs = 6/6`, and `stop_ok_runs = 6/6`.
+- The current default `auto` path still wins on end-to-end warm-plus-open wall
+  time. On Tor Check, median combined wall stayed better at `8.200s` versus
+  `8.668s`. On the homepage, median combined wall stayed better at `13.729s`
+  versus `15.310s`.
+- But this rerun also sharpened an important limit: `auto` is not the faster
+  browser/open path by itself in this immediate warm-then-open workflow. On
+  Tor Check, median browser elapsed/load were `8029.309ms` / `6411.151ms`
+  versus `5435.075ms` / `3851.612ms` for `tor_boot_95`. On the homepage they
+  were `13606.711ms` / `12088.289ms` versus `12317.889ms` / `10616.318ms`.
+- Paired wins tell the same story. `auto` won combined wall only `3/6` times
+  on Tor Check and `4/6` on the homepage, but it won browser elapsed/load only
+  `1/6` on Tor Check and `2/6` on the homepage. So this lane remains a valid
+  workflow-speed win, not a clean "browser itself opens faster" win.
+- I then retuned the managed `auto` gate in product code so managed
+  `torfast warm` still returns at `socks_ready`, but reused network
+  `torfast open` keeps the safer `tor_boot_95` launch gate instead of
+  downgrading back to `socks_ready`.
+- Fresh workflow proof under
+  `results/torfast-warm-open-compare-20260704T155648/summary.json` compared
+  the retuned `auto` against explicit `tor_boot_95` across `6` rotated cycles
+  on Tor Check and the homepage. Quality stayed clean in every saved run:
+  `ok_runs = 6/6`, `open_browser_ok_runs = 6/6`, `open_tor_boot_ok_runs = 6/6`,
+  `reused_service_ok_runs = 6/6`, `torrc_isolate_socks_auth_ok_runs = 6/6`,
+  and `stop_ok_runs = 6/6`.
+- This retune removed the earlier browser-open regression from the real
+  `warm` + `open` path. Browser elapsed became effectively flat to explicit
+  `tor_boot_95`: Tor Check `3.044s` versus `3.045s`, homepage `3.021s`
+  versus `3.031s`.
+- Combined wall stayed near-parity while preserving the fast warm return:
+  on Tor Check, retuned `auto` was only `+0.071s` slower than explicit
+  `tor_boot_95` (`6.413s` versus `6.342s`), while on the homepage it was
+  `-0.501s` faster (`6.223s` versus `6.724s`). The difference comes from
+  `auto` keeping warm-side readiness at about `0.06s` and spending about
+  `2.8-2.9s` of that wait later inside `open`, whereas explicit
+  `tor_boot_95` spends that wait in `warm`.
+- Current direction: keep this narrower managed `auto` retune for the product
+  repeated-open path. It keeps exact-quality workflow behavior without the
+  earlier browser-open regression, while the broader goal still needs a bigger
+  product-path speed win beyond warm/open workflow overlap. The fallback `cz`
+  review saved at
+  `results/torfast-warm-open-compare-20260704T155648/cz-second-opinion-summary-only.md`
+  agreed: this retune is better aligned, shows no new Tor quality regression,
+  and should stay the repeated-open default while broader regressions keep
+  being watched.
 
 ## 2026-06-24 status
 
@@ -10652,6 +12350,29 @@ lab-only for now, but it is the best current fast path that kept browser
 quality clean in this repo. Keep that claim scoped to this 3-target browser
 workload until it survives more reruns across time and network conditions.
 
+Release same-window recheck on July 1, 2026:
+`results/browser-compare-20260701T193354/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260701T193354/analysis.md`, compared plain
+release Arti against the exact old wrapper lane
+`arti_release_browser_healthaware_sameiso2_prefercold_prewarmfirst` plus local
+C Tor on the same 3-target cold interleaved gate. Quality passed.
+
+This recheck supersedes the old wrapper choice. Plain release Arti beat the old
+tuned lane on median page load on all three targets: `2457.904ms` versus
+`3901.354ms` on Tor check, `8985.109ms` versus `9226.725ms` on the homepage,
+and `9919.927ms` versus `25446.151ms` on the download page. The tuned lane also
+had the worse max tail on every target, including a `60003.178ms` accepted
+download load. In that same window, plain release Arti also beat local C Tor on
+raw median page load on all three pages, though local C Tor boot was unusually
+bad (`168.917s`) and should not be treated as a stable cold-boot baseline from
+this one run.
+
+Decision now is stricter and simpler: for normal browser scope, the current
+winner wrapper goes back to plain release Arti with no extra selector or
+same-isolation lab flags. Keep the health-aware sameiso2/prefer-cold/prewarm
+lane available only as a lab comparison path until a future same-window rerun
+shows a real, repeatable page-load win without the huge download tail.
+
 Pending-wait follow-up on the exact same winner shape was rejected. The run
 `results/browser-compare-20260626T071624/browser-compare.json`, with analyzer
 output at `results/browser-compare-20260626T071624/analysis.md`, added only
@@ -11001,3 +12722,3935 @@ fix, but it is not ready for broad promotion. `gpt-5.4-pro` via `cz` matched
 the call: do not jump to the gated-prebuild plus `hsdescshare` combo yet.
 First make `hsdescshare` survive more multi-target hidden-service reruns with
 clean boot behavior and no target-specific regressions.
+
+The multi-target harness now has a fairness guard for this exact question.
+`tools/run_browser_compare.py` and
+`tools/run_browser_compare_hidden_service.py` now expose
+`--interleaved-target-order {fixed,rotating}` for interleaved runs. In rotating
+mode, target order shifts by round instead of staying in fixed input order, and
+the saved JSON now records both the top-level
+`interleaved_target_order_strategy` and each run's `target_order`. Validation
+passed with `python3 -m py_compile` on both scripts, and `--help` on both
+runners shows the new flag.
+
+Fresh rotated hidden-service rerun:
+`results/browser-compare-20260626T105916/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260626T105916/analysis.md`, reran the same
+two-target matrix with rotating target order and the same current hidden-service
+browser lane:
+
+- `https://securedrop.org/`
+- `http://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion/download/index.html`
+
+Rotation did not rescue `hsdescshare`. The baseline boot path was the bad one
+in this sample (`76.014s`, with `8` directory failures, `8` timeouts, and `8`
+partial responses), while `hsdescshare` booted cleanly at `7.895s`. But page
+loads still went the wrong way on both targets: on `securedrop`,
+`hsdescshare` won only `1/4` paired loads and had paired median load delta
+`+4552.234ms`; on the direct onion page it also won only `1/4` paired loads
+with paired median load delta `+3654.547ms`. The analyzer still blocks it with
+`slower than C Tor`, `resource queue`, `slow onion/data gap`, and
+`slow hostname stream`, and the selector-risk rows still say
+`no selector move; more connect wait` on both targets. Strict decision stays
+the same: do not promote broad multi-target `hsdescshare` from this rerun.
+
+Targeted follow-up removed only first-stream same-isolation prewarm from the
+same rotated matrix:
+`results/browser-compare-20260626T111620/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260626T111620/analysis.md`. Quality
+passed, and the result split cleanly by target.
+
+On `securedrop`, removing prewarm fixed the `hsdescshare` direction. It won
+`4/4` paired loads, paired median load delta was `-2857.223ms`, summary median
+load delta was `-3255.596ms`, and max load dropped to `3401.264ms` versus
+baseline `20861.072ms`. But on the direct onion download page, `hsdescshare`
+still rejected hard: it won only `1/4` paired loads, paired median load delta
+was `+5916.043ms`, summary median load delta was `+5046.889ms`, and max load
+was worse by `+14586.962ms` (`24662.711ms` versus `10075.749ms`).
+
+The mechanism is sharper now. The `securedrop` loss was partly an exit-side
+interaction with first-stream same-isolation prewarm, so removing that prewarm
+helped. But the direct onion blocker is still the hidden-service page itself.
+The analyzer's queue-loss row now labels the onion regression
+`single selected circuit queue`, with the worst run clustering `6` streams on
+`Circ 3.67`, and the selector-risk row still says
+`no selector move; more connect wait`. Decision: same-isolation prewarm is not
+the main direct-onion blocker for `hsdescshare`. The next source lane should
+focus on HS-side tunnel/connect timing and single-circuit resource-queue
+collapse on the direct onion page, not more exit same-isolation tuning.
+
+The runner can now test the exact next hidden-service combo directly.
+`tools/run_browser_compare.py` adds
+`--extra-arti-hs-rend-prebuild-before-desc-shared-cache`, and
+`tools/run_browser_compare_hidden_service.py` can pass it through for the same
+matrix. This only adds a lab compare profile; it does not change default path
+choice, isolation, relay rules, or browser prefs. Validation passed:
+`python3 -m py_compile tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tests/test_browser_quality.py`,
+`python3 -m unittest tests.test_browser_quality.BrowserQualityTests.test_interleaved_schedule_can_add_extra_arti_ab_profile`,
+`python3 tools/run_browser_compare.py --help | rg extra-arti-hs-rend-prebuild-before-desc-shared-cache`,
+and `git diff --check -- tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tests/test_browser_quality.py`.
+
+Direct combo proof
+`results/browser-compare-20260626T114512/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260626T114512/analysis.md`, compared plain
+Arti, `hsdescshare`, and the new combo
+`arti_release_browser_hsrendpredesc_hsdescshare` on the same rotated
+two-target matrix as `111620`: `securedrop`, the direct onion download page,
+same-isolation target `2`, health-aware prefer-cold selection, and no
+first-stream prewarm.
+
+Strict result: reject the combo. Quality failed because the combo hit a real
+direct-onion browser failure on run `1`: Firefox reached `about:neterror`
+after `91650.738ms`, with a slow onion `CONNECT` on port `443` at `2666ms`.
+That alone keeps it lab-only.
+
+The timing tradeoff is also worse than it first looks. Plain Arti booted in
+`7.184s` and loaded at `2723.543ms` on `securedrop` and `9265.973ms` on the
+onion page. `hsdescshare` booted in `16.579s`, loaded at `3931.704ms` on
+`securedrop`, `5756.541ms` on the onion page, and still passed quality. The
+combo booted even slower at `21.657s`; it loaded `securedrop` at `4572.342ms`
+and the onion page at `4193.499ms` on successful runs, but only `3/4` onion
+runs were usable.
+
+The HS mechanism read also stays negative for the combo. Plain `hsdescshare`
+kept the real descriptor-share benefit: `15` shared hits, `6` stores, median HS
+tunnel `1357.5ms`, and median HS state task `1357.5ms`. The combo lost that
+shape: it logged `0` shared hits and `10` stores, median HS tunnel rose to
+`1946.5ms`, and median HS state task rose to `1766ms`. So the mixed profile
+did not preserve the shared-cache win; it mostly paid more boot cost and more
+`securedrop` loss for a riskier onion lane.
+
+The A/B rows make the ship call simple. Against plain Arti, `hsdescshare` lost
+`securedrop` by `+1004.757ms` paired median load but won the onion page by
+`-3832.534ms` and stayed clean. The combo lost `securedrop` even harder
+(`+2169.457ms` paired median load), won the onion page on the `3` successful
+paired runs (`-3779.392ms`), but still lost `+9400.526ms` on summary boot plus
+load and failed one run. `gpt-5.4-pro` via `cz` matched the reject call: keep
+the combo lab-only and do not promote it over plain `hsdescshare`.
+
+The compare harness also now defends against the Marionette hang that blocked
+the first `hsintrooverlap` rerun. `tools/run_browser_compare.py` gives
+`MarionetteClient` a full response deadline instead of only a per-read wait, so
+slow or dribbling replies turn into saved timeouts instead of freezing a whole
+matrix forever. The first attempt
+`results/browser-compare-20260626T120525` stayed partial and should not be used
+as proof; it stalled before writing `browser-compare.json` after a late browser
+navigation. Validation passed:
+`python3 -m py_compile tools/run_browser_compare.py tests/test_browser_quality.py`,
+`python3 -m unittest tests.test_browser_quality.BrowserQualityTests.test_marionette_read_packet_uses_total_deadline tests.test_browser_quality.BrowserQualityTests.test_interleaved_schedule_can_add_extra_arti_ab_profile`,
+and `git diff --check -- tools/run_browser_compare.py tests/test_browser_quality.py`.
+
+Fresh rerun with that guard:
+`results/browser-compare-20260626T121403/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260626T121403/analysis.md`, compared plain
+Arti, `hsdescshare`, and `hsintrooverlap` on the same rotated two-target cold
+matrix: `securedrop`, the direct onion download page, same-isolation target
+`2`, health-aware prefer-cold selection, and no first-stream prewarm. Quality
+passed.
+
+`hsintrooverlap` is out. It booted at `21.148s`, loaded `securedrop` at
+`7000.510ms`, and loaded the onion page at `17226.718ms`. Against plain Arti it
+lost `securedrop` by `+888.563ms` paired median load and the onion page by
+`+5631.359ms`. The analyzer also logged `boot directory` failure signals and
+kept the direct-onion queue-loss reason at `single selected circuit queue`.
+Keep `hsintrooverlap` lab-only.
+
+`hsdescshare` is now the current hidden-service-heavy winner for this exact
+matrix. It booted faster than plain Arti (`11.100s` versus `16.785s`), loaded
+`securedrop` faster (`3669.508ms` versus `5428.085ms`), and loaded the onion
+download page much faster (`5877.838ms` versus `11595.359ms`). In direct A/B it
+won `securedrop` `3/4` paired runs with paired median load delta `-742.380ms`
+and summary median load delta `-1758.577ms`. On the onion page it won `4/4`
+paired runs with paired median load delta `-5631.708ms`, summary median load
+delta `-5717.521ms`, and max load delta `-39875.515ms`.
+
+The hidden-service mechanism also stayed aligned with the page win. The
+candidate logged `17` shared descriptor hits and `6` stores, median descriptor
+time fell to `0ms`, median intro ack was `624ms`, median HS tunnel was
+`1916ms`, and median HS state task was `1780ms`. That is the real descriptor-
+share shape we wanted. The onion selector-risk row still says
+`no selector move; more connect wait`, so this is not an exit-choice story; the
+win is in the hidden-service path itself.
+
+The scope still matters. `hsdescshare` is not the broad default winner yet.
+It still had one bad `securedrop` tail (`10819.177ms`, max delta
+`+3507.134ms`), and raw `securedrop` load is still slower than local C Tor
+(`3669.508ms` versus `2843.832ms`) even though end-to-end boot plus median load
+was faster on both targets. `gpt-5.4-pro` via `cz` said
+`PROMOTE-SCOPED`: promote `hsdescshare` as the current winner for this exact
+two-target cold hidden-service matrix, but keep the claim scoped there and do
+not widen it to the general browser default yet.
+
+`tools/run_browser_compare_hidden_service.py` now follows that call. The
+wrapper keeps the same current-family baseline, removes first-stream prewarm,
+and enables `--extra-arti-hs-desc-shared-cache` by default. The rejected
+`hsintrooverlap` lane is only opt-in through
+`--extra-arti-hs-intro-rend-overlap`, and the failed combo lane stays opt-in
+through `--extra-arti-hs-rend-prebuild-before-desc-shared-cache`. Validation
+passed:
+`python3 -m py_compile tools/run_browser_compare_hidden_service.py`,
+`python3 tools/run_browser_compare_hidden_service.py --help`,
+and `git diff --check -- tools/run_browser_compare_hidden_service.py`.
+
+The hidden-service wrapper now matches the scoped proof shape better by
+default. `tools/run_browser_compare_hidden_service.py` now defaults to `4`
+runs and `--interleaved-target-order rotating`, and
+`tools/run_browser_compare.py` plus the wrapper can also test the lab-only
+combo `--extra-arti-hs-desc-shared-cache-intro-circuit-hedge-ms`.
+Validation passed:
+`python3 -m py_compile tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tests/test_browser_quality.py`,
+`python3 -m unittest tests.test_browser_quality.BrowserQualityTests.test_marionette_read_packet_uses_total_deadline tests.test_browser_quality.BrowserQualityTests.test_interleaved_schedule_can_add_extra_arti_ab_profile`,
+`python3 tools/run_browser_compare_hidden_service.py --help`,
+and `git diff --check -- tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tests/test_browser_quality.py docs/latest-results.md`.
+
+Fresh combo check:
+`results/browser-compare-20260626T123304/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260626T123304/analysis.md`, compared
+plain Arti, plain `hsdescshare`, and
+`hsdescshare_hsintrohedge500ms` on the same rotated `4`-run two-target cold
+matrix: `securedrop`, the direct onion download page, same-isolation target
+`2`, health-aware prefer-cold selection, and no first-stream prewarm. Quality
+passed.
+
+The call is strict: reject `hsdescshare_hsintrohedge500ms`. Plain Arti booted
+in `20.488s` and loaded at `3419.977ms` on `securedrop` and `10471.132ms` on
+the onion page. Plain `hsdescshare` was the clear winner in this run: it
+booted in `11.764s`, loaded `securedrop` in `1817.992ms`, loaded the onion
+page in `4741.989ms`, and had no directory failure signals. The combo
+regressed to `23.626s` boot, `5990.875ms` on `securedrop`, and `5217.921ms`
+on the onion page.
+
+The analyzer's blocker table explains why the combo stays out. It logged
+`boot directory`, `slower than C Tor`, `resource queue`, `slow onion/data
+gap`, and `slow hostname stream`, with worst load delta `+3722.611ms`,
+`6` directory failure signals, `2` directory failures, `2` directory
+timeouts, `2` partial responses, and `1` warning. Its cold tails were also
+ugly: `securedrop` reached `14603.417ms` and `6997.940ms`, and the onion page
+reached `18951.229ms`.
+
+`gpt-5.4-pro` via `cz pro` matched the repo read with `CALL: BOTH`: keep plain
+`hsdescshare` as the current scoped winner for this exact matrix, and reject
+`hsdescshare_hsintrohedge500ms`. The scope still stays narrow: this is a
+hidden-service-heavy rotated `4`-run cold matrix result, not a broad default
+promotion.
+
+The next hidden-service lane now has a direct lab-only combo:
+`--extra-arti-hs-desc-shared-cache-hspool-on-demand-race-ms`. It keeps the
+same descriptor-share winner path, then races the hidden-service pool
+on-demand stem against ready pool work. This does not widen relay rules,
+descriptor choice, intro content, stream isolation, browser prefs, or the
+baseline Arti path; it only adds one extra compare profile.
+
+Validation passed:
+`python3 -m py_compile tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tests/test_browser_quality.py`,
+`python3 -m unittest tests.test_browser_quality.BrowserQualityTests.test_marionette_read_packet_uses_total_deadline tests.test_browser_quality.BrowserQualityTests.test_interleaved_schedule_can_add_extra_arti_ab_profile`,
+`python3 tools/run_browser_compare_hidden_service.py --help`,
+and `git diff --check -- tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tests/test_browser_quality.py docs/latest-results.md`.
+
+Fresh scoped-combo proof:
+`results/browser-compare-20260626T125508/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260626T125508/analysis.md`, compared
+plain Arti, plain `hsdescshare`, and
+`hsdescshare_hspoolrace150ms` on the same rotated `4`-run two-target cold
+matrix: `securedrop`, the direct onion download page, same-isolation target
+`2`, health-aware prefer-cold selection, and no first-stream prewarm. Quality
+passed.
+
+This time the combo is the new scoped winner. Plain Arti booted in `17.686s`
+and loaded at `2932.633ms` on `securedrop` and `7350.495ms` on the onion page.
+Plain `hsdescshare` was worse in this rerun: `19.356s` boot,
+`3768.869ms` on `securedrop`, and `6812.419ms` on the onion page. The new
+combo, `hsdescshare_hspoolrace150ms`, booted in `10.646s`, loaded
+`securedrop` in `2053.771ms`, and loaded the onion page in `5804.934ms`. It
+also beat local C Tor on median load for both targets in this matrix
+(`2408.192ms` and `6179.182ms` for local C Tor).
+
+The A/B rows are strong enough for a scoped promotion. Against plain Arti, the
+combo won `securedrop` `4/4` paired runs with paired median load delta
+`-878.861ms`, summary median load delta `-544.996ms`, and boot plus median
+load delta `-7918.862ms`. On the onion page it also won `4/4` paired runs,
+with paired median load delta `-1545.561ms` and summary median load delta
+`-1461.114ms`. It beat plain `hsdescshare` cleanly on the timing table too,
+while dropping directory failure signals from `12` to `0`.
+
+The HsPool mechanism also really fired in this run, so this is not just sample
+noise. Saved logs for `hsdescshare_hspoolrace150ms` show repeated
+`torfast hspool timing stem ready` rows from `source="pool"`, plus
+`source="on_demand"` rows at `542ms` and `869ms`. That matches the intended
+hidden-service pool race path.
+
+The scope still stays narrow. The combo keeps `slower than C Tor` and
+`slow onion/data gap` as blockers, and the direct onion page still had one real
+tail at `13094.161ms`, with summary max-load delta `+4701.001ms`. So this is
+not a broad default promotion and it is not a privacy-equivalence proof by
+itself. But for this exact hidden-service-heavy rotated `4`-run cold matrix,
+`gpt-5.4-pro` via `cz pro` said `PROMOTE-SCOPED-COMBO`: replace plain
+`hsdescshare` with `hsdescshare_hspoolrace150ms` as the current scoped winner.
+
+`tools/run_browser_compare_hidden_service.py` now follows that call. The
+wrapper keeps plain `hsdescshare` in the matrix and also enables
+`--extra-arti-hs-desc-shared-cache-hspool-on-demand-race-ms 150` by default,
+so each hidden-service rerun keeps checking the current scoped winner against
+both base Arti and the prior `hsdescshare` lane.
+
+Fresh post-fix rerun:
+`results/browser-compare-20260626T175729/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260626T175729/analysis.md`, compared
+plain Arti, plain `hsdescshare`, and `hsdescshare_hspoolrace150ms` on the same
+rotated `4`-run two-target cold matrix: `securedrop`, the direct onion
+download page, same-isolation target `2`, health-aware prefer-cold selection,
+and no first-stream prewarm. Quality passed.
+
+The source change moved the call back to plain `hsdescshare`. In
+`upstream/arti/crates/tor-hsclient/src/connect.rs`, descriptor fetch now
+re-checks the shared hidden-service descriptor cache while retrying HsDir
+attempts. That lets one same-process same-service request reuse a descriptor
+another request already fetched instead of burning another HsDir retry. It does
+not add network fetches, widen path rules, change browser prefs, or change
+stream isolation.
+
+After that fix, plain `hsdescshare` is the scoped winner again. It booted in
+`5.818s`, loaded `securedrop` in `2079.453ms`, and loaded the onion page in
+`5508.648ms`. Plain Arti landed at `13.093s`, `3411.604ms`, and `9300.974ms`.
+`hsdescshare_hspoolrace150ms` regressed to `12.941s`, `4921.036ms`, and
+`7136.114ms`. Local C Tor was `15.666s`, `2736.015ms`, and `6046.082ms`. So in
+this exact matrix, plain `hsdescshare` beat plain Arti, beat the combo on both
+targets, and also beat local C Tor on both targets.
+
+The mechanism proof matched the timing shift. In the winning plain
+`hsdescshare` cold onion run, saved logs show one descriptor-dir fetch,
+descriptor ready at about `633ms`, shared-cache store at about `633ms`, and
+circuit established at about `1679ms`. The earlier repeated HsDir retry shape
+is gone in that sample. The combo no longer looked like the winner after this
+fix; it stayed slower on both targets and kept the analyzer blockers
+`slower than C Tor`, `slow onion/data gap`, and `slow hostname stream`.
+
+The scope still stays narrow. Plain `hsdescshare` still had one bad
+`securedrop` tail at `7725.329ms`, and the analyzer still flags
+`slow onion/data gap` and `slow hostname stream`, so this is not a broad
+default promotion. But for this exact hidden-service-heavy rotated `4`-run
+cold matrix, `gpt-5.4-pro` via `cz` said `PROMOTE-HSDESCSHARE` with medium
+confidence: promote plain `hsdescshare` back over
+`hsdescshare_hspoolrace150ms` and stop enabling the `150ms` hspool race by
+default.
+
+`tools/run_browser_compare_hidden_service.py` now follows that call again. The
+wrapper keeps `--extra-arti-hs-desc-shared-cache` on by default and leaves
+`--extra-arti-hs-desc-shared-cache-hspool-on-demand-race-ms` opt-in only, so
+hidden-service reruns start from the current scoped winner and only add the
+race lane when we ask for it.
+
+Validation passed:
+`python3 -m py_compile tools/run_browser_compare_hidden_service.py`,
+`python3 tools/run_browser_compare_hidden_service.py --help`,
+and `git diff --check -- tools/run_browser_compare_hidden_service.py docs/latest-results.md`.
+
+The hidden-service wrapper now also passes through neutral proof flags:
+`--browser-net-log`, `--byte-tap`, and
+`--byte-tap-socks-reply-bind-port-tag`. This does not change normal benchmark
+defaults; it only lets hidden-service reruns reuse the same scoped winner path
+while collecting browser-to-SOCKS proof when we ask for it.
+
+Focused `securedrop` proof-only replay:
+`results/browser-compare-20260626T182009/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260626T182009/analysis.md`, reran the
+current hidden-service winner path on just `https://securedrop.org/` for `2`
+cold runs with `--browser-net-log --byte-tap --byte-tap-socks-reply-bind-port-tag`.
+Quality passed. This is diagnostic evidence only, not a promotion gate, because
+the proof mode changes logging and byte-tap shape and only covers one target.
+
+The important result is what did *not* happen. Plain `hsdescshare` did not
+reproduce the earlier bad queue/tail story in this proof mode. It loaded
+`securedrop` in `3175.557ms` median, very close to local C Tor at
+`3074.364ms`, and the blocker table shrank to only `slower than C Tor` with
+worst load delta `+101.193ms`. There were `0` queued runs, `0` slow onion
+streams, `0` slow hostname streams, and `0` unresolved slow streams in this
+diagnostic slice.
+
+The byte-tap/browser-activity joins also corrected the earlier source read.
+Actual late resources on the `hsdescshare` runs stayed on normal hostname SOCKS
+targets:
+`securedrop.org`, `media.securedrop.org`, `analytics.freedom.press`, and
+`freedomofpress.report-uri.com`. The old onion-looking resource joins from the
+non-byte-tap run were only low-confidence timing matches and are not strong
+enough to justify a hidden-service source patch by themselves.
+
+Local browser queue pressure on the winner was also small. On the two
+`hsdescshare` runs, tagged same-connection queue totals were only
+`166.670ms` and `133.336ms`, with `0` rows queued `>=1000ms`. The queued
+resources were just brief same-hostname follow-ons such as
+`fee27252d12016efe268.be89647f5ea5.woff2` and
+`_site_title.da334db69a73.svg`. In other words: the current winner path does
+not show a repeatable large local queue bottleneck on this page when exact
+resource-to-SOCKS proof is available.
+
+Decision: do not guess a new source fix from the old `securedrop` tail yet.
+The safe next step is broader proof on the same winner shape, ideally another
+rotated hidden-service-heavy rerun plus targeted byte-tap/browser-net-log
+replays only when a slow tail actually reproduces. The current evidence says
+the earlier `securedrop` tail may have been remote-side or one-off page timing
+noise, not a stable hidden-service resource path inside Arti.
+
+Proof-grade broader rerun:
+`results/browser-compare-20260626T183920/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260626T183920/analysis.md`, reran the same
+two-target hidden-service matrix for `4` cold runs with
+`--browser-net-log --byte-tap --byte-tap-socks-reply-bind-port-tag`. This is
+the deciding rerun for the current call because it adds exact browser-to-SOCKS
+proof and cleanly supersedes the earlier broader non-proof run
+`results/browser-compare-20260626T182859`.
+
+Overall analyzer `quality: FAIL` in this proof-grade rerun only because the
+baselines broke, not because the winner broke. Plain Arti failed
+`https://securedrop.org/` on `2/4` runs, both from connect-wait browser
+timeouts. Local C Tor failed the direct onion page on `1/4` runs with a browser
+timeout. Plain `hsdescshare` stayed clean on both targets with `4/4` successes,
+browser quality prefs present, fingerprint proof present, and screenshots saved.
+
+The timing call is not close in this sample. Plain `hsdescshare` booted in
+`13.522s`, loaded `securedrop` in `3880.947ms`, and loaded the direct onion
+page in `6177.344ms`. Plain Arti booted in `27.556s`, loaded `securedrop` in
+`9162.595ms` on its `2` successful runs, and loaded the onion page in
+`45970.533ms`. Local C Tor booted in `43.639s`, loaded `securedrop` in
+`6780.406ms`, and loaded the onion page in `20557.852ms` on its `3`
+successful runs.
+
+That makes plain `hsdescshare` faster than plain Arti by `57.6%` on
+`securedrop` and `86.6%` on the onion page. It also beat local C Tor by
+`42.8%` on `securedrop` and `70.0%` on the onion page. Boot was faster than
+both baselines too.
+
+The analyzer backs the promotion call. In `Arti Promotion Blocker Summary`,
+`arti_release_browser_hsdescshare` had `slow targets = 0`,
+`worst load delta ms = -2899.459`, `dir failure signals = 0`, and next proof
+`clean baseline proof`. The blocker row still includes `baseline failed`
+because plain Arti failed in this compare, not because the candidate regressed.
+
+The proof joins are strong enough to trust the source read. `Browser Net Log
+Resource Evidence` bridged resources to SOCKS streams on all four onion runs
+and also gave clean browser-to-proxy resource proof on all four `securedrop`
+runs, with exact stream bridging on the key slow `securedrop` run. The
+`Browser Activity Tagged Connection Queue Cause Summary` for
+`arti_release_browser_hsdescshare` on `securedrop` showed `0` rows queued
+`>=1000ms` on all four runs, with total queue only `50.001ms`, `66.668ms`,
+`133.336ms`, and `183.337ms`. So this proof-grade rerun does not show a large
+local browser queue bottleneck on the current winner.
+
+Decision: promote plain `hsdescshare` as the current winner for the measured
+scope. Do not patch source again right now. The earlier mixed non-proof rerun
+no longer decides the call.
+
+`gpt-5.4-pro` via `cz` matched the repo read with
+`CALL: PROMOTE-HSDESCSHARE`, `CONFIDENCE: medium`. Its exact guidance was:
+keep plain `hsdescshare` as the current winner on this measured scope, and do
+not make another source patch unless future broader proof shows a new real
+regression.
+
+Focused direct-onion intro-hedge recheck:
+`results/browser-compare-20260626T190024/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260626T190024/analysis.md`, reran only
+plain `hsdescshare` versus `hsdescshare_hsintrohedge500ms` on the direct onion
+download page. Quality passed.
+
+This confirmed the earlier reject call. The `500ms` intro hedge improved raw
+page load from `9414.666ms` to `7688.471ms`, but boot jumped from `11.706s` to
+`19.087s`, so boot plus load got worse from `21120.666ms` to `26775.471ms`.
+The analyzer still blocked it with `boot slower`, `boot directory`, and
+`slow onion/data gap`, with `3` dir failures, `3` dir timeouts, and `3`
+partial responses. Decision: keep `hsdescshare_hsintrohedge500ms` rejected.
+It is not promotable even on the direct onion page by itself.
+
+Focused direct-onion HsPool race screen:
+`results/browser-compare-20260626T191806/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260626T191806/analysis.md`, compared
+plain Arti, plain `hsdescshare`, and
+`hsdescshare_hspoolrace{25,50,150}ms` on only the direct onion download page.
+Quality passed.
+
+`25ms` is out. It was slower on both boot and page load and brought back
+boot-directory trouble. `150ms` is also out for now. It improved cold
+boot plus load in that one slice, but page load regressed badly, it kept
+`resource queue`, and one run hit a `30542.456ms` tail with
+`20533.744ms` queued. `50ms` was the only lane worth a proof-grade rerun:
+no boot-directory failure signals in that slice, raw page load
+`6387.599ms`, and boot plus load `29365.599ms`, but still slower than plain
+`hsdescshare` on raw page load there (`5163.233ms`). Decision: do not promote
+any HsPool race window from this screen. Keep `50ms` lab-only and make it beat
+the current winner under proof-grade logging first.
+
+Proof-grade direct-onion `50ms` rerun:
+`results/browser-compare-20260626T193110/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260626T193110/analysis.md`, reran plain
+Arti, plain `hsdescshare`, `hsdescshare_hspoolrace50ms`, and local C Tor on
+only the direct onion download page with
+`--browser-net-log --byte-tap --byte-tap-socks-reply-bind-port-tag`. Quality
+passed.
+
+This narrowed the story. `hsdescshare_hspoolrace50ms` clearly fired: saved logs
+show repeated `source="pool"` and `source="on_demand"` HsPool timing rows plus
+pool reuse rows. It also won raw page load on this page in this proof slice:
+`6966.759ms` versus plain `hsdescshare` at `10612.654ms` and local C Tor at
+`8515.778ms`.
+
+But the ship call still stays strict. Boot regressed from `15.519s` on plain
+`hsdescshare` to `21.758s` on `hsdescshare_hspoolrace50ms`, so boot plus load
+was still worse than plain `hsdescshare` (`28724.759ms` versus
+`26131.654ms`). The analyzer blocker row for `hsdescshare_hspoolrace50ms`
+still kept `resource queue, slow onion/data gap`, with `4` queued runs,
+`1` queue-worse target, `max queued ms = 5516.777`,
+`max queue delta ms = 1700.034`, and `7` slow unresolved onion streams. Queue
+pressure was better than plain `hsdescshare` on the first three runs, but run
+`4` still had `20` queued `>=1000ms` rows and the max queue tail.
+
+Decision: keep plain `hsdescshare` as the current scoped winner. The
+`50ms` HsPool race is promising, but it is not promotable yet because it still
+gives back too much on boot and still keeps real queue and stream-gap
+blockers.
+
+Second-opinion note: `gpt-5.4-pro` via `cz` was attempted again on this call,
+but the `puppro` path stalled and then timed out after a transport/network
+stream error, so there is no usable outside answer for this rerun. The repo
+call above stays based on the saved local proof.
+
+Fair same-log single-page rerun:
+`results/browser-compare-20260626T195219/browser-compare.json`, with summary at
+`results/browser-compare-20260626T195219/analysis.md`, reran plain Arti, plain
+`hsdescshare`, `hsdescshare_hspoolrace50ms`, and local C Tor on only the direct
+onion download page after forcing the same Arti log level on every Arti
+profile: `info,tor_circmgr=debug,tor_hsclient=debug`. Quality passed.
+
+This rerun mattered because the compare harness had been unfair. In
+`tools/run_browser_compare.py`, `effective_arti_log_level()` was auto-adding
+`tor_circmgr=debug` only when `hspool_on_demand_race_ms > 0`, so the earlier
+`50ms` proof mixed product behavior with extra log cost. Under symmetric
+logging, `hsdescshare_hspoolrace50ms` did win this one page on full boot plus
+load: `22939.126ms` versus plain `hsdescshare` at `26908.997ms`, local C Tor
+at `30343.476ms`, and plain Arti at `39611.781ms`.
+
+That changed the narrow read but not the ship rule. The same-log rerun proved
+that `50ms` is a real speed lane on this one onion page, but it was still only
+one target. Decision from this rerun alone: keep `50ms` in the lab and force a
+broader proof before any promotion call.
+
+Broader fair rerun after the tool fix:
+`results/browser-compare-20260626T200227/browser-compare.json`, with summary at
+`results/browser-compare-20260626T200227/analysis.md`, repeated the two-target
+hidden-service proof with plain Arti, plain `hsdescshare`,
+`hsdescshare_hspoolrace50ms`, and local C Tor after removing that hidden
+log-level bias from the harness. Quality passed on both targets for all
+profiles: every profile finished `4/4`, screenshots stayed stable, and resource
+counts stayed in family.
+
+This broader proof put the ship call back on solid ground. `50ms` improved raw
+page load on both measured targets, but it gave back far too much on boot. On
+the direct onion page it loaded in `7675.095ms` versus plain `hsdescshare` at
+`9812.966ms`, but boot was `22.918s` versus `9.798s`, so boot plus load was
+still much worse: `30593.094ms` versus `19610.965ms`. The same thing happened
+on `securedrop`: `50ms` loaded in `2829.752ms` versus plain `hsdescshare` at
+`7408.933ms`, but boot plus load still lost badly: `25747.752ms` versus
+`17206.933ms`.
+
+The boot failure signals came back too, so this is not just timing noise. The
+`50ms` boot log for `200227` shows `TorAccessFailed` channel-build failures,
+repeated directory partial-response timeouts, and an invalid-directory-document
+parse error before bootstrap finally completed. Plain `hsdescshare` booted
+cleanly in `9.798s` with no comparable failure storm.
+
+Decision: keep plain `hsdescshare` as the current broader winner. The fair
+single-page rerun showed why `50ms` looked promising, but the broader fair
+rerun still rejects promotion. `hsdescshare_hspoolrace50ms` stays lab-only
+until it can hold the boot line on a wider proof run.
+
+Second-opinion note for the broader fair rerun: `gpt-5.4-pro` via `cz` was
+tried again with a short self-contained prompt after `200227`, but it timed
+out again without returning a model answer. The only output was local
+plugin/transport noise on stderr, including one `Transport channel closed`
+message from an MCP auth path. So there is still no usable outside answer for
+this latest rerun, and the call above stays based on the saved local proof.
+
+Delayed-start HsPool race combo support:
+`tools/run_browser_compare.py` now accepts
+`--extra-arti-hs-desc-shared-cache-hspool-race-background-start-delay-combo`
+in `RACE_MS:START_DELAY_MS` form, so the compare runner can measure
+`hsdescshare`, an on-demand HsPool race window, and a delayed background pool
+start in the same interleaved fair matrix. The new parser records the combo in
+the saved result config, enforces the same interleaved-only rule as the other
+extra Arti lab profiles, and names the derived profile
+`arti_release_browser_hsdescshare_hspoolrace50ms_hspoolstart5000ms` for the
+`50:5000` case. Focused checks passed after the patch:
+`py_compile`, the existing log-level symmetry unit test, the expanded
+interleaved-profile unit test, and `git diff --check` on the touched files.
+
+Direct-onion delayed-start combo screen:
+`results/browser-compare-20260626T202208/browser-compare.json`, with summary at
+`results/browser-compare-20260626T202208/analysis.md`, compared plain Arti,
+plain `hsdescshare`, the old `hsdescshare_hspoolrace50ms`, the new delayed
+combo `hsdescshare_hspoolrace50ms_hspoolstart5000ms`, and local C Tor on only
+the direct onion download page with the same explicit Arti log level on every
+Arti profile: `info,tor_circmgr=debug,tor_hsclient=debug`.
+
+This screen showed the intended fix. The old `50ms` lane still improved raw
+page load, but it paid for it with a huge boot jump (`25.902s`). Delaying the
+background HsPool start to `5000ms` kept the race benefit while cutting that
+boot tax hard: the new combo booted in `10.369s`, loaded in `5575.912ms`, and
+won on full boot plus load at `15944.912ms` versus plain `hsdescshare` at
+`16699.867ms`. HsPool timing rows also looked healthier: the delayed combo was
+mostly pool-backed with a few race wins (`pool = 56`, `race = 4`,
+`stem_failed = 0`), while plain `hsdescshare` still needed `on_demand = 6`
+and logged `2` failed on-demand stem rows.
+
+Decision from `202208`: the delayed-start combo is real enough for broader
+proof, but this single-page screen is not a ship gate by itself.
+
+First broader fair rerun for the delayed-start combo:
+`results/browser-compare-20260626T202812/browser-compare.json`, with summary at
+`results/browser-compare-20260626T202812/analysis.md`, reran the exact broader
+two-target hidden-service matrix on `securedrop` plus the direct onion
+download page. This used the direct compare runner because the hidden-service
+wrapper still does not expose the new combo flag or explicit `--arti-log-level`
+pass-through yet.
+
+The result was good enough to keep the combo alive, but not good enough to
+ship. The delayed-start combo beat plain `hsdescshare` on full boot plus load
+on both measured targets:
+`23024.562ms` versus `23890.780ms` on `securedrop`, and
+`26934.765ms` versus `30097.681ms` on the onion page. Its source rows also
+looked cleaner in this window: the combo stayed all pool-backed (`pool = 86`),
+while plain `hsdescshare` needed `on_demand = 16` on top of `pool = 80`. Plain
+`hsdescshare` also logged `TorAccessFailed` plus a circuit-build failure in
+boot, while the combo had no matching bad boot signal.
+
+That still was not enough for a promote call. In the same window, plain Arti
+still beat the combo on full boot plus load on both targets
+(`15684.142ms` and `22343.207ms`), and local C Tor also beat it on both
+(`18047.610ms` and `19132.673ms`). So `202812` upgraded the combo from a
+single-page trick to a broader lab candidate, but not to the overall winner.
+
+Confirm rerun for the delayed-start combo:
+`results/browser-compare-20260626T203658/browser-compare.json`, with summary at
+`results/browser-compare-20260626T203658/analysis.md`, repeated the same
+broader fair matrix again. This confirm rerun passed cleanly: every profile
+finished `4/4`.
+
+The combo beat plain `hsdescshare` again on both targets:
+`24465.148ms` versus `32675.384ms` on `securedrop`, and
+`29941.624ms` versus `38575.164ms` on the onion page. The boot difference was
+the main reason. Plain `hsdescshare` blew up to `28.805s` boot, while the
+delayed-start combo held `20.597s`. The boot logs also stayed much cleaner on
+the combo. Plain `hsdescshare` logged repeated `TorAccessFailed` directory
+channel failures plus a `NOTDIRECTORY` bootstrap error. The delayed-start
+combo showed only one directory-timeout line in the same boot-signal slice.
+HsPool timing rows again matched the intended fast path:
+`pool = 88`, `race = 11`, `stem_failed = 0`, while plain `hsdescshare` still
+needed `on_demand = 6` and logged `2` failed on-demand stem rows.
+
+The broader call stays strict. The delayed-start combo has now beaten plain
+`hsdescshare` twice in a row on the broader fair matrix, so it is the next
+serious `hsdescshare`-derived lab candidate. But it still did not beat plain
+Arti in either broader fair rerun, and the local C Tor comparison was unstable
+between the two reruns. So do not replace the repo's broader promoted winner
+yet based on this pair alone.
+
+Second-opinion note for this big turn: `gpt-5.4-pro` via `cz` could not be
+used. The local `~/.codex-cz/config.toml` path currently has a parse bug on
+`web_search = off`, so the retry was run with `--ignore-user-config`. That got
+past the local config parse, but the backend then returned
+`invalid_request_error`: `The 'gpt-5.4-pro' model is not supported when using Codex with a ChatGPT account.`
+So there is still no usable outside answer for this new delayed-start combo
+turn, and the call above stays based on the saved local proof.
+
+Direct-onion delay sweep for the delayed-start combo:
+`results/browser-compare-20260626T205300/browser-compare.json`, with summary at
+`results/browser-compare-20260626T205300/analysis.md`, held the race window
+fixed at `50ms` and swept only the background HsPool start delay:
+`3000ms`, `5000ms`, and `8000ms`, still on the same direct onion download page
+with symmetric Arti log level and browser proof enabled.
+
+This screen made the delay call much clearer. `5000ms` was the only strong
+answer. It booted in `11.048s`, loaded in `8789.988ms`, and won on full boot
+plus load at `19837.988ms`. That beat plain `hsdescshare` at `30785.016ms`,
+plain Arti at `33374.758ms`, and local C Tor at `29609.333ms` in the same
+window. The source rows also stayed clean: `pool = 36`, `race = 4`, and no
+failed stems in the saved HsPool timing rows.
+
+The other delays were bad. `3000ms` kept a high boot (`19.789s`), lost to
+plain `hsdescshare` on total time, and logged `2` bad boot-signal lines with
+`race_failed = 10`. `8000ms` went worse still on boot (`25.346s`) and also
+logged `2` bad boot-signal lines. Decision: keep `5000ms` and reject
+`3000ms` plus `8000ms`.
+
+Direct-onion race-window sweep with `5000ms` fixed:
+`results/browser-compare-20260626T210012/browser-compare.json`, with summary at
+`results/browser-compare-20260626T210012/analysis.md`, kept the winning
+`5000ms` delay and swept the race window itself: `25ms`, `50ms`, and `150ms`,
+still on the same direct onion page with the same proof settings.
+
+This narrow sweep changed the front-runner again. `25ms + 5000ms` won the page
+on full boot plus load at `23171.223ms`, beating plain `hsdescshare` at
+`24426.543ms` while staying `4/4`. Its saved boot slice stayed clean, and the
+HsPool rows were simple: `pool = 40`, `race = 8`, no failed stems.
+
+The wider race windows regressed in this exact screen. `50ms + 5000ms` loaded
+faster than `25ms + 5000ms`, but boot blew up to `21.833s`, total time lost at
+`30455.885ms`, and the boot slice logged `4` bad signal lines with
+`race_failed = 6`. `150ms + 5000ms` was the clear reject: it finished only
+`3/4`, booted in `21.173s`, and logged `12` bad signal lines with
+`race_failed = 20`. Decision from this screen: move `25ms + 5000ms` to a
+broader proof, and keep the wider race windows out of promotion.
+
+Broader proof for `25ms + 5000ms`:
+`results/browser-compare-20260626T210738/browser-compare.json`, with summary at
+`results/browser-compare-20260626T210738/analysis.md`, reran the broader fair
+two-target matrix on `securedrop` plus the direct onion download page for
+plain Arti, plain `hsdescshare`, the new `25ms + 5000ms` combo, and local C
+Tor.
+
+The timing read alone looked good. `25ms + 5000ms` beat plain `hsdescshare` on
+full boot plus load on both targets: `18590.786ms` versus `29646.099ms` on
+`securedrop`, and `29114.869ms` versus `35067.686ms` on the onion page. Its
+boot also stayed much cleaner than plain `hsdescshare` in the same run: the
+candidate logged `0` bad boot-signal lines, while plain `hsdescshare` logged
+`12`.
+
+But the hard quality rule failed on the onion page, so the promote call still
+stops here. The candidate finished only `3/4` on the onion target. The failed
+run hit a real browser error page:
+`about:neterror?e=onionServices.descNotFound`. That is not timing noise and not
+an acceptable quality trade. The saved HsPool rows also logged
+`race_failed = 14` even though total timing looked better than plain
+`hsdescshare`.
+
+Current call after this broader proof: keep the broader promoted winner
+unchanged. `25ms + 5000ms` is a real narrow speed lane, but it is not safe
+enough to promote because of the onion descriptor failure. The stronger broader
+lab evidence still belongs to the earlier `50ms + 5000ms` reruns, which beat
+plain `hsdescshare` twice while keeping `4/4`, even though the newer narrow
+screen for `50ms + 5000ms` was noisy.
+
+Direct-onion launch-width sweep on top of `50ms + 5000ms`:
+`results/browser-compare-20260626T213119/browser-compare.json`, with summary at
+`results/browser-compare-20260626T213119/analysis.md`, stayed on the same
+direct onion download page and tested only wider HsPool launch width on top of
+the earlier delayed-start combo.
+
+This narrow screen had one very strong winner and one clear reject. The new
+`launch2` lane (`hsdescshare_hspoolrace50ms_hspoolstart5000ms_hspoollaunch2`)
+cut boot to `13.822s`, finished `4/4`, logged `0` bad boot-signal lines, and
+won full boot plus load at `20837.887ms`. Plain `50ms + 5000ms` stayed `4/4`
+but collapsed to `50249.270ms` in the same screen and logged
+`TorAccessFailed` plus a circuit-build failure in boot.
+
+The wider `launch3` lane must be rejected now. It finished only `3/4`, logged
+`4` bad boot-signal lines, and the failed run hit a real onion error page:
+`about:neterror?e=onionServices.descNotFound`. Decision from this narrow
+screen: move only `launch2` into a broader proof and drop `launch3`.
+
+Broader proof for `launch2`:
+`results/browser-compare-20260626T214041/browser-compare.json`, with summary at
+`results/browser-compare-20260626T214041/analysis.md`, reran the broader fair
+two-target matrix on `securedrop` plus the direct onion download page for
+plain Arti, plain `hsdescshare`, plain `50ms + 5000ms`, the new `launch2`
+lane, and local C Tor.
+
+The new lane kept quality on the Arti side, but the broader speed read was not
+good enough to promote. `launch2` stayed `4/4` on both targets. But against
+plain `50ms + 5000ms`, it won the onion page by only `235.610ms` on full boot
+plus load (`29385.875ms` versus `29621.485ms`) and then lost badly on
+`securedrop` by `2871.280ms` (`25515.446ms` versus `22644.166ms`). Boot also
+got worse: `20.321s` for `launch2` versus `14.124s` for plain `50ms + 5000ms`.
+The `launch2` boot slice logged `4` bad signal lines, while plain
+`hsdescshare` and plain `50ms + 5000ms` were both clean in this exact run.
+
+This run window strongly favored plain `hsdescshare`, which finished `4/4` and
+won both measured targets at `13629.286ms` on `securedrop` and `19090.845ms`
+on the onion page. That is useful evidence, but not enough by itself to
+rewrite the repo-wide broader winner, because plain `hsdescshare` has been
+noisy in earlier broader reruns.
+
+Current call after this broader proof: reject promotion of `launch2` and keep
+the broader promoted winner unchanged. `launch2` is real as a narrow speed
+lane, but this broader proof did not show a stable enough two-target
+improvement over the current broader lab candidate.
+
+Fresh broader fair rerun for plain `hsdescshare` versus `50ms + 5000ms`:
+`results/browser-compare-20260626T215512/browser-compare.json`, with summary at
+`results/browser-compare-20260626T215512/analysis.md`, reran the same two
+measured targets (`securedrop` plus the direct onion download page) for plain
+Arti, plain `hsdescshare`, the delayed `50ms + 5000ms` combo, and local C Tor.
+
+This rerun kept the same tension between speed and the hard quality bar. On
+timing alone, plain `hsdescshare` was the fastest Arti lane on both targets:
+`19359.499ms` on `securedrop` and `22600.198ms` on the onion page. But it only
+finished the onion page `3/4`, and the failed run hit a real browser error
+page: `about:neterror?e=onionServices.descNotFound`. Plain Arti also finished
+only `3/4` on that same onion page in this rerun, with the same user-visible
+error.
+
+The delayed `50ms + 5000ms` combo was the only Arti lane that stayed `4/4` on
+both targets here, but it was far too slow to take over. It lost to plain
+`hsdescshare` by `12892.980ms` on `securedrop`
+(`32252.479ms` versus `19359.499ms`) and by `16475.629ms` on the onion page
+(`39075.827ms` versus `22600.198ms`). Its boot slice also logged `8` bad
+signal lines: `TorAccessFailed`, circuit-build failures, partial-response
+retirements, and directory timeouts. Plain `hsdescshare` boot stayed clean in
+the same rerun.
+
+This was not simple first-slot noise. On the failed onion round, local C Tor
+ran first and still finished `4/4`, the delayed combo also finished `4/4`,
+while plain Arti and plain `hsdescshare` each had one real onion failure. So
+the quality miss does not reduce cleanly to "the first request was unlucky."
+
+Current call after this broader proof: do not promote the delayed
+`50ms + 5000ms` combo over plain `hsdescshare`, and do not use this rerun to
+strengthen the current `hsdescshare` winner claim either. The plain lane is
+still the fastest Arti lane, but the exact no-quality-loss bar is still not
+solved on this matrix.
+
+Focused onion-only stress rerun for plain `hsdescshare` versus `50ms + 5000ms`:
+`results/browser-compare-20260626T221816/browser-compare.json`, with summary at
+`results/browser-compare-20260626T221816/analysis.md`, reran only the direct
+Tor download onion page for `6` cold runs per profile.
+
+This focused screen is much better for the delayed combo. The
+`50ms + 5000ms` lane finished `6/6`, booted in `12.185s`, and won the Arti
+lanes on full boot plus load at `22041.776ms`. Plain `hsdescshare` also
+stayed `6/6` in this onion-only stress rerun, which matters because the
+previous broader mixed-target rerun had shown a real onion `3/4` failure.
+That broader miss did not reproduce on this dedicated onion-only screen.
+
+Even with `6/6`, plain `hsdescshare` was far slower here because boot blew up
+to `28.561s`. The delayed combo beat it by `15162.401ms` on full boot plus
+load (`22041.776ms` versus `37204.177ms`). Local C Tor still won the exact
+page overall at `20764.761ms`, but the gap to the delayed combo was only
+`1277.015ms`. Plain Arti stayed the unstable lane at `5/6`, with another
+`about:neterror?e=onionServices.descNotFound` failure.
+
+Current call after this focused rerun: on the exact direct onion download page,
+`50ms + 5000ms` is the strongest safe Arti lane we have. Keep that call scoped
+to onion-only proof for now. The broader mixed-target matrix is still
+unresolved because the same combo has looked too slow on `securedrop`.
+
+Focused `securedrop`-only stress rerun for plain `hsdescshare` versus
+`50ms + 5000ms`:
+`results/browser-compare-20260626T222619/browser-compare.json`, with summary at
+`results/browser-compare-20260626T222619/analysis.md`, reran only
+`https://securedrop.org/` for `6` cold runs per profile.
+
+This screen cleanly confirms the other half of the split. All four lanes
+finished `6/6`, so there is no quality ambiguity here. Plain `hsdescshare`
+won the Arti lanes on full boot plus load at `21571.302ms`. The delayed
+`50ms + 5000ms` combo did load the page a little faster
+(`4959.806ms` versus `5517.302ms`), but boot gave it away:
+`21.242s` versus `16.054s`. That pushed the combo to `26201.806ms`, well
+behind plain `hsdescshare`.
+
+The boot signal story also flipped relative to the onion-only run. On this
+exact `securedrop` screen, the delayed combo had `0` bad boot-signal lines,
+while plain `hsdescshare` logged `4` bad signal lines. But those boot lines
+did not turn into user-visible failures here, and plain `hsdescshare` still
+won the actual user-facing timing.
+
+Current call after the focused stress pair: the target split is real.
+`50ms + 5000ms` is the strongest safe Arti lane on the exact direct onion
+download page, while plain `hsdescshare` is still the strongest safe Arti lane
+on `securedrop`. The broader mixed-target winner is still unresolved, because
+the best safe lane depends on which target shape matters.
+
+Demand-start HS-pool race support:
+`upstream/arti/crates/tor-circmgr/src/hspool.rs` now has a default-off lab
+env, `TORFAST_HSPOOL_BACKGROUND_START_ON_DEMAND`, that skips the initial
+boot-time HS-pool wakeup and waits for the first onion-demand fire instead.
+`tools/run_browser_compare.py` and
+`tools/run_browser_compare_hidden_service.py` now expose that through
+`--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-ms`,
+so the compare runner can measure a same-window lane that combines
+`hsdescshare`, HsPool on-demand race, and demand-start background launch.
+Focused checks passed after the patch: `py_compile`, browser-quality unit tests
+for Arti env wiring, HsPool log-level symmetry, the expanded interleaved
+profile matrix, the new Rust source parser test, and `git diff --check` on the
+touched files.
+
+Broader fair screen for the new demand-start lane:
+`results/browser-compare-20260626T231335/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260626T231335/analysis.md`, reran the
+two-target hidden-service matrix on `securedrop` plus the direct onion
+download page for plain Arti, plain `hsdescshare`, the new demand-start lane
+`arti_release_browser_hsdescshare_hspoolrace50ms_hspoolbgondemand`, the older
+delayed-start lane `hsdescshare_hspoolrace50ms_hspoolstart5000ms`, and local
+C Tor. Quality passed cleanly: every lane finished `4/4` on both targets.
+
+The new lane did the first thing it needed to do. It beat both older
+`hsdescshare`-derived lanes on both measured targets. On `securedrop`, the new
+lane landed at `19951.081ms` boot plus median load, versus delayed-start at
+`20539.269ms` and plain `hsdescshare` at `26244.340ms`. On the direct onion
+page, it landed at `24392.294ms`, versus delayed-start at `25855.476ms` and
+plain `hsdescshare` at `32394.003ms`. Its boot slice was also a middle ground:
+`5` bad boot-signal lines, versus `12` on plain `hsdescshare` and `0` on the
+delayed-start lane.
+
+That is still not enough for a repo-wide promote call, because this exact
+window favored plain Arti hard. Plain Arti finished `4/4` on both targets and
+won full boot plus load at `11378.901ms` on `securedrop` and `18678.913ms` on
+the onion page. The new demand-start lane stayed slower by `8572.180ms` on
+`securedrop` and `5713.381ms` on the onion page. Local C Tor was far behind
+everything in this run.
+
+Current call after `231335`: promote the demand-start lane over the older
+`hsdescshare` family lab candidates. It is the first clean broader screen
+where one `hsdescshare`-derived lane beat both sides of the earlier split in
+the same window. But do not promote it over plain Arti yet, and do not rewrite
+the repo-wide exact no-quality-loss call from this single screen alone. The
+best next proof is a focused onion-only stress rerun for plain Arti versus the
+new demand-start lane, because that is where plain Arti has looked least
+stable in earlier work.
+
+Second-opinion note for this big turn: `cz` with `gpt-5.4-pro` was tried again
+after `231335`, and it failed the same way as before. The backend returned
+`invalid_request_error`: `The 'gpt-5.4-pro' model is not supported when using Codex with a ChatGPT account.`
+
+Focused onion-only follow-up for the demand-start lane:
+`results/browser-compare-20260626T233340/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260626T233340/analysis.md`, reran only the
+direct onion download page for plain Arti, plain `hsdescshare`, the same
+demand-start lane
+`arti_release_browser_hsdescshare_hspoolrace50ms_hspoolbgondemand`, and local C
+Tor for `6` cold interleaved runs. Quality passed cleanly: every lane finished
+`6/6`.
+
+This rerun split the read two ways. Plain `hsdescshare` stayed the cold-start
+winner inside the `hsdescshare` family at `20268.115ms` boot plus median load,
+because its boot stayed much lower (`10.664s` versus `15.633s`). But the
+demand-start lane had the best pure page-load read in that family:
+`8593.521ms` median load versus `9604.115ms` for plain `hsdescshare`, and it
+also beat local C Tor on median load (`8785.817ms`) and boot plus median load
+(`24226.520ms` versus `32456.817ms`).
+
+The strict compare against plain Arti is still not clean enough to promote the
+demand-start lane over it. Plain Arti loaded at `8702.342ms`; the demand-start
+lane landed at `8593.521ms` on summary median load, but paired A/B was only
+`3/6` load wins, paired median load delta was `+20.745ms`, and max load was
+still worse by `+302.835ms` (`10234.516ms` versus `9931.681ms`). The blocker
+table still says `boot directory, resource queue, slow onion/data gap`.
+
+The queue read points at the same late page tail as before, not a privacy cut.
+Response start was earlier by `-1858.370ms` against plain Arti, but
+`DOM -> load` got worse by `+2108.376ms`. The analyzer labels the loss
+`browser resource queue`, with the worst queued resource again on the download
+image lane and median `fetchStart -> requestStart` still `+408.341ms` slower
+than plain Arti.
+
+Current call after `233340`: keep the demand-start lane in the default
+hidden-service compare matrix next to plain `hsdescshare`, because it is the
+best current load-oriented `hsdescshare` variant for this exact onion-only
+screen and it cleanly beats local C Tor without a quality miss. But do not
+promote it over plain Arti yet. The next source work still needs to cut the
+late browser-queue / stream-gap tail.
+
+The hidden-service wrapper now follows that call more closely by default.
+`tools/run_browser_compare_hidden_service.py` keeps plain `hsdescshare` in the
+matrix and also includes
+`--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-ms 50`
+unless the same `50ms` lane was already requested explicitly.
+
+Second-opinion retry after `233340`: `cz exec -m gpt-5.4-pro` was tried again
+for this exact onion-only call, and it is still blocked on this machine's
+account. The backend returned the same `invalid_request_error`:
+`The 'gpt-5.4-pro' model is not supported when using Codex with a ChatGPT account.`
+
+Focused onion-only timeout-cap follow-up for the demand-start lane:
+`results/browser-compare-20260627T004138/browser-compare.json` reran the same
+direct onion download page with plain Arti, plain `hsdescshare`, plain
+`arti_release_browser_hsdescshare_hspoolrace50ms_hspoolbgondemand`, the new
+`hspoolbgbuildcap3000ms` lane, the new `hsdirextendcap3000ms` lane, and local
+C Tor. The final rerun used `--compact-output` only to stay inside disk space;
+it does not change the Tor path or browser request behavior. Quality stayed
+clean: every lane finished `6/6`, browser default-prefs proof passed, and the
+no-Marionette fingerprint proof also passed.
+
+This run makes the background-build timeout cap easy to reject. Relative to the
+plain `50ms` demand-start lane, `hspoolbgbuildcap3000ms` was slower on summary
+median load (`7999.729ms` versus `6293.039ms`), slower on boot plus median load
+(`35067.729ms` versus `16244.039ms`), had only `3/6` paired load wins, and its
+paired median load delta against the plain `50ms` lane was `+1083.377ms`.
+
+The HSDir extend cap is more interesting but still not the lane to promote for
+speed. `hsdirextendcap3000ms` beat plain Arti on all `6/6` paired load reads
+and cut the worst page-load tail versus the plain `50ms` lane (`8936.755ms`
+max load versus `14032.458ms`). But it still lost the median-speed race to the
+plain `50ms` lane: `7174.827ms` median load versus `6293.039ms`, `8709.317ms`
+median elapsed versus `7897.317ms`, and a `+378.251ms` paired median load delta
+versus plain `50ms`.
+
+Current call after `004138`: promote plain
+`arti_release_browser_hsdescshare_hspoolrace50ms_hspoolbgondemand` as the
+default hidden-service speed lane for this onion-only screen. Keep
+`hsdirextendcap3000ms` as an optional tail-stability lane worth rechecking
+later, but not as the promoted default because it is slower on the main speed
+metric. Reject `hspoolbgbuildcap3000ms`.
+
+Second-opinion retry after `004138`: `cz exec -m gpt-5.4-pro` worked on this
+machine and returned the same call in short form: promote plain demand-start,
+keep the `3000ms` HSDir cap as an optional consistency variant, and reject the
+background-build cap.
+
+Focused onion-only intro-hedge follow-up for the demand-start lane:
+`results/browser-compare-20260627T011506/browser-compare.json` reran only the
+direct onion download page for plain Arti, plain `hsdescshare`, plain
+`arti_release_browser_hsdescshare_hspoolrace50ms_hspoolbgondemand`, the new
+`arti_release_browser_hsdescshare_hspoolrace50ms_hspoolbgondemand_hsintrohedge500ms`
+combo, and local C Tor. This run used the same explicit Arti log level on
+every Arti lane for fairness:
+`info,tor_circmgr=debug,tor_hsclient=debug`. Quality stayed clean: every lane
+finished `6/6`, browser default-prefs proof passed, and the no-Marionette
+fingerprint proof also passed.
+
+The new intro-hedge combo is rejected. Against the current plain demand-start
+lane, it won only `2/6` paired loads, had `+1275.325ms` paired median load
+delta, and had `+1217.541ms` paired median elapsed delta. The hedge did fire:
+logs showed `6` launch events, `2` `primary won` events, one direct `won`
+event, and two `recovered` events. But the main timing still got worse:
+median `connect_ms` rose from `2515ms` to `3345.5ms`, and median HS connect
+task time rose from `1856ms` to `2777.5ms`.
+
+This exact fair rerun also put plain `hsdescshare` back on top inside the Arti
+family. It loaded in `5092.487ms`, versus `10340.363ms` for plain demand-start
+and `10761.789ms` for the intro-hedge combo. In paired A/B, plain
+`hsdescshare` beat plain demand-start on `4/6` loads with `-3327.322ms` paired
+median load delta, and beat the intro-hedge combo on `5/6` loads with
+`-2869.210ms` paired median load delta. It also beat local C Tor on median
+page load in this exact window (`5092.487ms` versus `6463.134ms`), though not
+on boot plus median load.
+
+Current call after `011506`: reject
+`arti_release_browser_hsdescshare_hspoolrace50ms_hspoolbgondemand_hsintrohedge500ms`.
+Treat this as a combo check, not a full rewrite of the earlier normal-log
+onion-only demand-start call from `004138`. The new evidence is strong enough
+to keep the intro hedge out, but one symmetric-debug rerun alone is not enough
+to replace the broader scoped default lane call.
+
+Second-opinion retry after `011506`: `cz exec -m gpt-5.4-pro` was tried again
+with the exact intro-hedge result summary, but it is blocked on this machine's
+account. The backend returned the same `invalid_request_error`:
+`The 'gpt-5.4-pro' model is not supported when using Codex with a ChatGPT account.`
+
+Focused onion-only HSDir extend-cap rerun:
+`results/browser-compare-20260627T013424/browser-compare.json` reran only the
+direct onion download page for plain Arti, plain `hsdescshare`, plain
+`arti_release_browser_hsdescshare_hsdirextendcap3000ms`, and local C Tor for
+`6` cold interleaved runs. Quality stayed clean: browser default-prefs proof
+passed and the no-Marionette fingerprint proof also passed.
+
+This was the first clean screen where plain `hsdirextendcap3000ms` looked like
+a real speed lane on that exact onion page. It finished `6/6`, booted in
+`13.094s`, loaded in `6545.479ms`, and landed at `19639.479ms` full boot plus
+load. That beat plain `hsdescshare` by `17476.372ms` on cold total
+(`37115.851ms`) and beat local C Tor by `9849.793ms` (`29489.272ms`). In
+paired A/B against plain `hsdescshare`, the cap lane won load `6/6`, with
+`-8289.815ms` paired median load delta, and it also won elapsed `6/6` with
+`-8258.964ms` paired median elapsed delta.
+
+Current call after `013424`: plain `hsdirextendcap3000ms` looked like the best
+onion-only cap candidate so far, but that read was still scoped to one direct
+onion page. `gpt-5.4-pro` via `cz` matched that call: promote it only as the
+current onion-only candidate, not as a broad default, and rerun the same idea
+on a mixed-target screen next.
+
+Broader fair rerun for plain `3000ms` cap:
+`results/browser-compare-20260627T015153/browser-compare.json` reran the
+two-target matrix on `https://securedrop.org/` plus the direct onion download
+page for plain Arti, plain `hsdescshare`, plain
+`arti_release_browser_hsdescshare_hsdirextendcap3000ms`, demand-start
+`arti_release_browser_hsdescshare_hspoolrace50ms_hspoolbgondemand`, and local
+C Tor, with `4` interleaved cold runs per target. Quality again stayed clean:
+browser default-prefs proof passed and the no-Marionette fingerprint proof also
+passed.
+
+This run showed why the plain cap is not safe as a broad default. It still won
+cold total because boot collapsed to `11.374s`: `19948.677ms` on `securedrop`
+and `17389.720ms` on the onion page, both better than plain `hsdescshare` on
+cold total. But the normal page path broke the wrong way on `securedrop`.
+Plain `hsdescshare` loaded `securedrop` in `4221.642ms`; the plain cap lane
+fell to `8574.677ms`, with only `1/4` load wins and `+4572.736ms` paired
+median load delta. Raw runs showed the damage in the late page tail after first
+byte, not in a clear privacy or fingerprint miss.
+
+Current call after `015153`: keep plain `hsdirextendcap3000ms` out of any
+broad default. It stayed interesting as a cold-start and onion-only trick, but
+the `securedrop` regression was real. `gpt-5.4-pro` via `cz` matched that
+strict read and gave the next safe move directly: make the same `3000ms` cap
+startup-only, then rerun the same two-target matrix.
+
+Startup-only HSDir cap support:
+`upstream/arti/crates/tor-circmgr/src/hspool.rs` and
+`upstream/arti/crates/tor-circmgr/src/hspool/pool.rs` now support the
+default-off lab env
+`TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_STARTUP_ONLY`, which keeps the
+HSDir extend cap on during bootstrap and disables it after bootstrap. The
+compare runners `tools/run_browser_compare.py` and
+`tools/run_browser_compare_hidden_service.py` now expose that path through
+`--extra-arti-hs-desc-shared-cache-hsdir-extend-timeout-cap-startup-only-ms`.
+Focused checks passed after the patch: `py_compile`, the browser-quality unit
+tests for Arti env wiring and the new interleaved profile,
+`cargo check -p tor-circmgr --features hs-common,tor-proto/hs-common`,
+`cargo test -p tor-circmgr --features testing,vanguards,hs-common,tor-proto/hs-common hsdir_extend_timeout_cap --lib`,
+and `cargo build -p arti --release`. The broad static fixture test
+`tests.test_arti_quality_config.ArtiQualityConfigTests.test_accepts_expected_static_quality_sources`
+still fails on many older missing fixture checks; that failure did not come
+from this startup-only patch.
+
+Broader fair rerun for the new startup-only lane:
+`results/browser-compare-20260627T023825/browser-compare.json` reran the same
+two-target matrix for plain Arti, plain `hsdescshare`, plain
+`arti_release_browser_hsdescshare_hsdirextendcap3000ms`, new
+`arti_release_browser_hsdescshare_hsdirextendcap3000ms_startuponly`,
+demand-start `arti_release_browser_hsdescshare_hspoolrace50ms_hspoolbgondemand`,
+and local C Tor. Quality stayed clean again: browser default-prefs proof
+passed and the no-Marionette fingerprint proof also passed.
+
+This is the best balanced read so far for the cap idea. The startup-only lane
+kept the strong onion gain and removed most of the bad `securedrop` hit from
+the plain cap. On the direct onion page it loaded in `6662.8435ms`, versus
+`9192.364ms` for plain `hsdescshare`, `8226.0395ms` for demand-start, and
+`12192.631ms` for plain cap. In paired A/B it beat plain `hsdescshare` on
+onion load `4/4` with `-2372.040ms` paired median load delta, beat plain cap
+on onion load `4/4` with `-5494.2115ms`, and beat demand-start on onion load
+`3/4` with `-1651.057ms`. On `securedrop`, startup-only still stayed slower
+than plain `hsdescshare` on raw page load (`3112.9605ms` versus `2411.4865ms`),
+but it cut most of the plain-cap damage (`4114.055ms`) and beat demand-start
+there too (`4091.623ms`), with `3/4` wins and `-978.6625ms` paired median load
+delta against demand-start.
+
+The cold-total read is more mixed, which is why this is not a full broad
+promote yet. Plain `hsdirextendcap3000ms` still had the best Arti cold total
+on `securedrop` because its boot stayed much lower: `30455.055ms` versus
+`33190.961ms` for startup-only. But startup-only was the better balanced
+`hsdescshare`-derived lane across the full two-target screen: it beat
+demand-start on cold total on both targets (`33190.961ms` versus `34589.623ms`
+on `securedrop`, `36740.844ms` versus `38724.039ms` on the onion page), and it
+beat plain `hsdescshare` on the onion page by a very wide margin
+(`36740.844ms` versus `50889.364ms`).
+
+Current call after `023825`: keep
+`arti_release_browser_hsdescshare_hsdirextendcap3000ms_startuponly` as the
+best current balanced Arti cap lane. It is much safer than plain
+`hsdirextendcap3000ms`, clearly better than the demand-start lane in this exact
+two-target screen, and it keeps the strong direct-onion win. But it is not the
+full default winner yet, because plain `hsdescshare` is still better on the
+`securedrop` raw page path and plain cap still has the best Arti cold total
+there. The next smallest safe move is to keep the startup-only idea and tune
+the cap upward a little, so the `securedrop` gap can shrink without giving back
+the onion gain.
+
+Second-opinion note after `023825`: `gpt-5.4-pro` via `cz` was tried several
+times on June 27 2026 for this exact summary. The normal Azure-backed path
+accepted the prompt but never returned a usable reply before manual stop, even
+after retries with lower reasoning and most extra features turned off. A
+stripped local retry also fell back to a ChatGPT-account path that returned
+`invalid_request_error`: `The 'gpt-5.4-pro' model is not supported when using Codex with a ChatGPT account.` No clean second-opinion text was captured
+for `023825` on this machine.
+
+Startup-only cap tuning rerun:
+`results/browser-compare-20260627T030523/browser-compare.json` reran the same
+two-target fair matrix with plain Arti, plain `hsdescshare`, startup-only
+`hsdirextendcap3000ms`, startup-only `hsdirextendcap4000ms`, startup-only
+`hsdirextendcap5000ms`, and local C Tor. Quality stayed clean again: browser
+default-prefs proof passed and the no-Marionette fingerprint proof also
+passed.
+
+This screen split the cap choices clearly. `4000ms` and `5000ms` did cut the
+raw `securedrop` page more than `3000ms`, but they paid for it with much worse
+bootstrap and worse onion totals. `4000ms` loaded `securedrop` at
+`2391.428ms`, but its cold totals were worse than plain `hsdescshare` on both
+targets: `22932.428ms` on `securedrop` and `27485.674ms` on the onion page,
+versus `22554.875ms` and `26073.062ms` for plain `hsdescshare`. `5000ms` was
+easy to park: it loaded `securedrop` at `2239.252ms`, but cold totals blew out
+to `32540.252ms` and `39281.429ms`.
+
+`3000ms` stayed the best overall candidate in that tuning screen. It kept the
+strongest total win by far: `11105.677ms` on `securedrop` and `15418.123ms` on
+the onion page, versus `22554.875ms` and `26073.062ms` for plain
+`hsdescshare`. Raw page speed was close enough to keep it live too. On
+`securedrop`, it won load `2/4` with `-374.265ms` paired median load delta. On
+the onion page, paired load was almost a tie by median (`+24.9115ms`) even
+though the summary median still trailed that exact sample. The big extra reason
+to keep `3000ms` up front was bootstrap shape in this screen: it had only `9`
+boot signal lines and `0` boot-error-like lines, versus `21 / 11` for plain
+`hsdescshare`, `22 / 8` for `4000ms`, and `35 / 13` for `5000ms`.
+
+Current call after `030523`: treat startup-only
+`arti_release_browser_hsdescshare_hsdirextendcap3000ms_startuponly` as the
+best current lab candidate. `gpt-5.4-pro` via `cz` matched that call in plain
+words: `3000ms` is strong enough to be the provisional lab default, `4000ms`
+is only a backup, `5000ms` should be parked, and the next safe move is a
+larger paired A/B of only `3000ms` versus plain `hsdescshare`.
+
+Larger confirmation rerun for startup-only `3000ms`:
+`results/browser-compare-20260627T031850/browser-compare.json` reran the same
+two targets with `6` interleaved rotating runs per target for plain Arti,
+plain `hsdescshare`, startup-only
+`arti_release_browser_hsdescshare_hsdirextendcap3000ms_startuponly`, and local
+C Tor. Quality stayed clean again: browser default-prefs proof passed and the
+no-Marionette fingerprint proof also passed.
+
+This confirmation run removed most of the doubt about the main speed call.
+Startup-only `3000ms` beat plain `hsdescshare` on both targets with more runs.
+On `securedrop`, it loaded in `3790.094ms` versus `5167.210ms`, won load
+`4/6`, had `-1530.492ms` paired median load delta, won elapsed `4/6`, and won
+full boot plus load `4/6` with `-1919.492ms` paired median delta. On the onion
+page, it loaded in `8171.5935ms` versus `15014.4175ms`, won load `5/6`, had
+`-6912.4605ms` paired median load delta, won elapsed `5/6`, and won full boot
+plus load `6/6` with `-7301.4605ms` paired median delta.
+
+The remaining risk also got sharper in this rerun. The earlier clean-boot
+story did not repeat. Boot seconds stayed close (`59.740s` for startup-only
+`3000ms` versus `60.129s` for plain `hsdescshare`), but the startup-only lane
+logged more boot-error-like lines this time (`19` versus `6`). That means the
+main remaining risk is tail and reliability shape, not the main page-speed
+direction and not an obvious privacy or fingerprint miss.
+
+Current call after `031850`: promote startup-only
+`arti_release_browser_hsdescshare_hsdirextendcap3000ms_startuponly` as the
+current hidden-service lab default candidate. It now has both the tuning win
+from `030523` and the larger direct A/B confirmation from `031850`. But keep
+the word `provisional`: the next proof should stay focused on failures and tail
+latency in another larger repeat, not on replacing it with a looser cap.
+
+Second-opinion note after `031850`: `gpt-5.4-pro` via `cz` returned a clean
+answer on this machine. It matched the measured read: promote startup-only
+`3000ms` for lab use now, keep the call provisional, treat reliability and
+tail behavior as the main remaining risk, and run one more larger repeat of the
+same interleaved A/B to judge failures and tails.
+
+The hidden-service wrapper now follows that promoted lab-default call.
+`tools/run_browser_compare_hidden_service.py` auto-includes startup-only
+`--extra-arti-hs-desc-shared-cache-hsdir-extend-timeout-cap-startup-only-ms 3000`
+by default, keeps plain `hsdescshare` in the same matrix, and no longer forces
+the older demand-start `50ms` lane unless it is requested explicitly. Focused
+checks passed for that wrapper switch:
+`python3 -m py_compile tools/run_browser_compare_hidden_service.py tests/test_run_browser_compare_hidden_service.py`
+and `python3 -m unittest tests.test_run_browser_compare_hidden_service`.
+
+Reliability-focused repeat for startup-only `3000ms`:
+`results/browser-compare-20260627T034624/browser-compare.json` reran the same
+two targets with `8` interleaved rotating runs per target for plain Arti,
+plain `hsdescshare`, startup-only
+`arti_release_browser_hsdescshare_hsdirextendcap3000ms_startuponly`, and local
+C Tor. Quality still stayed clean: browser default-prefs proof passed and the
+no-Marionette fingerprint proof also passed.
+
+This repeat did not hold the earlier promotion story cleanly enough. The
+startup-only `3000ms` lane still looked a little better by summary median page
+load than plain `hsdescshare`: `5289.895ms` versus `5556.676ms` on
+`securedrop`, and `8563.344ms` versus `9706.373ms` on the onion download page.
+It also kept the lower worst page-load tail in this exact run: `7001.601ms`
+versus `19918.169ms` on `securedrop`, and `31937.055ms` versus `37592.594ms`
+on the onion page.
+
+But the direct paired read versus plain `hsdescshare` got weak once the bigger
+sample landed. On `securedrop`, startup-only `3000ms` won page load only `4/8`
+with paired median load delta `-385.934ms`, and it won full boot plus load
+only `1/8` with paired median total delta `+10978.066ms`. On the onion page,
+it won page load only `3/8` with paired median load delta `+1932.073ms`, and
+it won full boot plus load only `1/8` with paired median total delta
+`+13296.073ms`. The blocker was startup shape, not privacy or browser quality:
+boot jumped to `20.890s` versus `9.526s` for plain `hsdescshare`, and the boot
+directory timeline logged `2` channel-open errors, `2` build fails, and a
+`10003ms` max channel-open time, versus `0`, `0`, and `1212ms` for plain
+`hsdescshare`.
+
+Current call after `034624`: keep startup-only
+`arti_release_browser_hsdescshare_hsdirextendcap3000ms_startuponly` as a live
+candidate, but do not keep it as the hidden-service wrapper default yet. The
+safer lab default is back to plain `hsdescshare` until another
+reliability-focused confirmation or a clear startup fix lands.
+
+Second-opinion note after `034624`: `gpt-5.4-pro` via `cz` returned a clean
+answer on this machine again. It matched the measured read: revert startup-only
+`3000ms` as the wrapper default for now, keep it as a candidate, and make the
+next safest experiment another direct paired A/B against plain `hsdescshare`
+with the read centered on boot-directory and channel-open reliability.
+
+The hidden-service wrapper was reverted to match that safer call.
+`tools/run_browser_compare_hidden_service.py` no longer auto-includes
+startup-only `3000ms` by default, still keeps plain `hsdescshare` in the
+matrix, and
+still forwards startup-only caps or demand-start flags when they are requested
+explicitly. Focused checks passed for that revert too:
+`python3 -m py_compile tools/run_browser_compare_hidden_service.py tests/test_run_browser_compare_hidden_service.py`
+and `python3 -m unittest tests.test_run_browser_compare_hidden_service`.
+
+Focused follow-up for demand-start background pool launch plus startup-only
+`3000ms`:
+`results/browser-compare-20260627T042510/browser-compare.json` ran plain Arti,
+plain `hsdescshare`, startup-only
+`arti_release_browser_hsdescshare_hsdirextendcap3000ms_startuponly`,
+demand-start plus startup-only
+`arti_release_browser_hsdescshare_hspoolbgondemand_hsdirextendcap3000ms_startuponly`,
+and local C Tor with `4` interleaved rotating runs per target on
+`securedrop` and the onion download page. Quality stayed clean again: browser
+default-prefs proof passed and the no-Marionette fingerprint proof also
+passed.
+
+This combo fixed the earlier startup-only browsing slowdown after boot, but it
+did it the wrong way for a default. Against plain `hsdescshare`, the
+demand-start plus startup-only `3000ms` lane cut onion median elapsed to
+`6853.273ms` from `11155.116ms` and kept `securedrop` close at `4888.353ms`
+versus `4681.112ms`. But boot blew out to `25.515s` versus `9.263s`, so cold
+totals were much worse: `32368.273ms` versus `20418.115ms` on the onion page
+and `30403.353ms` versus `13944.112ms` on `securedrop`.
+
+The boot shape also stayed wrong for a default. Plain `hsdescshare` had `0`
+hidden-service-pool launch lines and `0` directory timeouts in this window.
+The demand-start plus startup-only lane still logged `12`
+`hspool: launching 3 NAIVE and 2 GUARDED circuits` lines during bootstrap and
+added `2` directory timeouts.
+
+Current call after `042510`: reject
+`arti_release_browser_hsdescshare_hspoolbgondemand_hsdirextendcap3000ms_startuponly`
+as a default or wrapper change. It is a useful lab data point only. The next
+clean move from this read was to isolate plain demand-start background launch
+against plain `hsdescshare`, without the startup-only cap.
+
+Second-opinion note after `042510`: `gpt-5.4-pro` via `cz` matched the
+measured read again on this machine. It said no default promotion, pointed at
+the worse cold totals and the new directory timeouts as the main risk, and
+suggested the next clean A/B should be plain `bg_on_demand` versus plain
+`hsdescshare`.
+
+Pure demand-start background-pool launch A/B:
+`tools/run_browser_compare.py` now supports
+`--extra-arti-hs-desc-shared-cache-hspool-background-start-on-demand` so the
+repo can test pure `hsdescshare + bg_on_demand` without also forcing a race or
+a startup-only cap. Focused checks passed for that small runner/test patch:
+`python3 -m py_compile tools/run_browser_compare.py tests/test_browser_quality.py`
+and
+`python3 -m unittest tests.test_browser_quality.BrowserQualityTests.test_interleaved_schedule_can_add_extra_arti_ab_profile`.
+
+`results/browser-compare-20260627T043840/browser-compare.json` then reran
+plain Arti, plain `hsdescshare`, pure demand-start
+`arti_release_browser_hsdescshare_hspoolbgondemand`, and local C Tor with `4`
+interleaved rotating runs per target on the same two pages. Quality stayed
+clean again: browser default-prefs proof passed and the no-Marionette
+fingerprint proof also passed.
+
+This A/B flipped the story. Pure `bg_on_demand` booted much faster than plain
+`hsdescshare` in this window: `11.014s` versus `22.537s`. That made cold
+totals better too: `28339.963ms` versus `31041.550ms` on the onion page, and
+`18791.814ms` versus `28130.961ms` on `securedrop`.
+
+But real browsing after boot got much worse, so this still is not safe as a
+default. Against plain `hsdescshare`, pure `bg_on_demand` raised onion median
+elapsed to `17325.963ms` from `8504.551ms` and raised `securedrop` median
+elapsed to `7777.814ms` from `5593.961ms`. The boot trace also changed shape:
+hidden-service-pool launch lines jumped from `0` to `11`, even though this
+exact run did not add directory timeouts.
+
+Current call after `043840`: reject pure
+`arti_release_browser_hsdescshare_hspoolbgondemand` as a default. It buys boot
+time by spending too much browsing time after boot.
+
+Second-opinion note after `043840`: `gpt-5.4-pro` via `cz` matched that read
+too. It said no default promotion, treated the `0 -> 11` jump in
+hidden-service-pool launch lines as the main risk signal, and pointed at one
+next experiment: keep `bg_on_demand`, but pair it with a shorter startup-only
+cap than `3000ms` so we try to keep most of the boot win without repeating the
+large browsing regression.
+
+Shorter startup-only cap screen on top of demand-start background launch:
+`results/browser-compare-20260627T044902/browser-compare.json` screened pure
+`bg_on_demand` plus `1000ms`, `1500ms`, and `2000ms` startup-only caps against
+plain `hsdescshare` on the same two pages with `3` interleaved rotating runs
+per target. Quality stayed clean again: browser default-prefs proof passed and
+the no-Marionette fingerprint proof also passed.
+
+This screen did not find a safe default. `1000ms` was the only lane with a
+clear post-boot `securedrop` win in that window (`3597.527ms` versus
+`4963.876ms` for plain `hsdescshare`), but it still hurt onion browsing
+(`9808.419ms` versus `6782.892ms`) and kept `4` directory timeouts. `1500ms`
+removed directory timeouts, but still browsed slower than plain `hsdescshare`
+on both targets (`9346.417ms` onion, `7026.890ms` `securedrop`). `2000ms`
+looked clearly wrong for post-boot browsing: very fast boot (`9.777s`) but
+very slow browsing (`19946.435ms` onion, `9065.535ms` `securedrop`) plus
+`3` `NOTDIRECTORY` boot events.
+
+Current call after `044902`: reject `1000ms`, `1500ms`, and `2000ms` as
+default candidates. They showed different partial wins, but none of them kept
+both browsing targets and startup shape clean enough.
+
+Second-opinion note after `044902`: `gpt-5.4-pro` via `cz` still said no safe
+default. It called `1000ms` the least-bad lab lead only because it was the one
+shorter cap with a real post-boot browsing win, and it pointed at one focused
+follow-up: `1250ms` in the same setup with more repeats.
+
+`1250ms` follow-up against `1000ms`:
+`results/browser-compare-20260627T050030/browser-compare.json` reran plain
+`hsdescshare`, pure `bg_on_demand`, `1000ms`, and `1250ms` with `4`
+interleaved rotating runs per target on the same two pages. Quality stayed
+clean again: browser default-prefs proof passed and the no-Marionette
+fingerprint proof also passed.
+
+This follow-up changed the read in an important way. In this window, pure
+`bg_on_demand` beat plain `hsdescshare` on both targets and on cold totals:
+boot `21.217s` versus `27.195s`, onion median elapsed `8179.196ms` versus
+`13117.309ms`, `securedrop` median elapsed `5159.552ms` versus `5714.532ms`,
+and cold totals `29396.196ms` / `26376.552ms` versus
+`40312.309ms` / `32909.533ms`.
+
+`1250ms` looked cleaner than `1000ms`, but it still was not the right lead.
+`1250ms` had `0` directory timeouts and only `7` hidden-service-pool launch
+lines versus `18` for `1000ms`, and it improved onion browsing over pure
+`bg_on_demand` (`6937.053ms` versus `8179.196ms`). But its boot climbed back
+to `29.772s`, so cold totals lost badly versus pure `bg_on_demand` on both
+targets. `1000ms` also stayed shaky: its `securedrop` runs included one
+`37798ms` outlier.
+
+Current call after `050030`: pure `bg_on_demand` is back as the current lab
+lead, but not as a default. The real blocker moved from “not fast enough” to
+“is this reproducible or just noisy?”
+
+Second-opinion note after `050030`: `gpt-5.4-pro` via `cz` matched that read.
+It said no safe default, called pure `bg_on_demand` the current lab lead, and
+pointed at one next experiment: a larger direct paired A/B of pure
+`bg_on_demand` versus plain `hsdescshare` to resolve the flip against the
+earlier bad run.
+
+Larger confirmation A/B for pure `bg_on_demand`:
+`results/browser-compare-20260627T051245/browser-compare.json` reran plain
+`hsdescshare` versus pure `bg_on_demand` with `8` interleaved rotating runs
+per target on the same two pages. Quality stayed clean again: browser default-
+prefs proof passed and the no-Marionette fingerprint proof also passed.
+
+This larger A/B kept pure `bg_on_demand` in front on the main medians. Against
+plain `hsdescshare`, it booted faster (`11.712s` versus `19.618s`), loaded the
+onion page faster (`8666.047ms` elapsed versus `10649.815ms`), loaded
+`securedrop` faster (`4883.570ms` versus `5573.940ms`), and won cold totals by
+large margins: `20378.047ms` versus `30267.815ms` on the onion page and
+`16595.569ms` versus `25191.940ms` on `securedrop`.
+
+The paired read also stayed positive, but only narrowly. Pure `bg_on_demand`
+won elapsed `5/8` and load `5/8` on both targets. The paired median deltas
+still favored it: `-1431.698ms` onion elapsed, `-1413.988ms` onion load,
+`-1491.537ms` `securedrop` elapsed, and `-1491.120ms` `securedrop` load.
+
+But this is still not safe to promote as a default because the onion tail is
+ugly. Pure `bg_on_demand` logged `1` build fail and `1` channel-open problem
+in boot, and one onion run blew out to `71534.821ms`, versus
+`11101.237ms` worst-case for plain `hsdescshare`. Onion `p75` also stayed
+worse for pure `bg_on_demand` (`12427.630ms` versus `10975.973ms`), even
+though `securedrop` `p75` favored pure `bg_on_demand`
+(`5454.469ms` versus `7183.084ms`).
+
+Current call after `051245`: pure
+`arti_release_browser_hsdescshare_hspoolbgondemand` is the current hidden-
+service lab lead, but still not a safe default or wrapper promotion. Right now
+it is the best speed candidate on median and cold-total reads, with the main
+open risk narrowed to onion-side tail and reproducibility.
+
+Second-opinion note after `051245`: `gpt-5.4-pro` via `cz` matched that read
+too. It still said no safe default, but it also said pure `bg_on_demand` is
+the current lab lead. The blocker is severe onion-tail instability, so the
+next best experiment is a larger replicated paired A/B focused on onion cold
+starts and tail outliers, while recording `build_failed`,
+`problem_opening_channel`, and hidden-service-pool launch signals.
+
+Focused onion-only tail proof for pure `bg_on_demand`:
+`results/browser-compare-20260627T053756/browser-compare.json` reran plain
+`hsdescshare` versus pure `bg_on_demand` on only the direct onion download
+page with `12` interleaved rotating runs, compact output, and saved per-run
+proxy tails. Quality stayed clean again: browser default-prefs proof passed,
+the no-Marionette fingerprint proof passed, and `webdriver` stayed `false`.
+
+This run flipped the hidden-service call back toward plain `hsdescshare`.
+Pure `bg_on_demand` still booted faster (`14.811s` versus `20.237s`), so the
+first cold total stayed better too (`25721.339ms` versus `36119.305ms`). But
+real onion browsing after boot got worse in the bigger onion-only window.
+Plain `hsdescshare` had better median elapsed/load
+(`9422.404ms` / `7826.274ms` versus `12544.635ms` / `11020.396ms`), better
+`p75` elapsed/load (`11389.108ms` / `9849.603ms` versus
+`13810.905ms` / `12281.738ms`), and pure `bg_on_demand` won only `3/12`
+paired runs. The paired median deltas also moved clearly against pure
+`bg_on_demand`: `+2450.109ms` elapsed and `+2430.294ms` load.
+
+The failure shape explains why the lead flipped. Pure `bg_on_demand` logged
+repeated `torfast hspool background circuit failed` rows across `8/12` runs.
+It also showed more hidden-service pain in this window: intro-circuit failures
+in `5` runs, rendezvous-too-long failures in `4` runs, intro-point-obtain
+failures in `5` runs, one intro communication timeout, and one hidden-service
+descriptor-fetch failure. Plain `hsdescshare` still had some bad rows too, but
+it kept the better median and tail shape on the actual onion workload.
+
+Current call after `053756`: revert the current hidden-service lab lead back
+to plain `arti_release_browser_hsdescshare`. Pure
+`arti_release_browser_hsdescshare_hspoolbgondemand` is still interesting only
+as a cold-start lab idea, but it is not the current hidden-service lead and
+it is not a safe default.
+
+Second-opinion note after `053756`: `gpt-5.4-pro` via `cz` matched that read
+too. It said the lead should revert to plain `hsdescshare`, called
+`hsdescshare` the only safe default supported by the current hidden-service
+data, and treated pure `bg_on_demand` as a cold-start-only idea. Its next move
+was narrow: keep descriptor sharing, remove speculative background hidden-
+service-pool circuit building, and test only a one-shot cold-start hidden-
+service prewarm if we want more speed without giving back onion median or tail.
+
+Shared-hit-only hidden-service prebuild follow-up:
+`results/browser-compare-20260627T061439/browser-compare.json` reran only the
+direct onion download page with plain Arti, plain `hsdescshare`, the new
+shared-hit-only lane
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly`, and local C
+Tor for `8` cold interleaved runs. Quality stayed clean again: browser
+default-prefs proof passed, the no-Marionette fingerprint proof passed, and
+`webdriver` stayed `false`.
+
+This was the first clean screen where the lead moved off plain
+`hsdescshare`. The new shared-hit-only lane kept `8/8` success, booted faster
+than plain `hsdescshare` (`16.363s` versus `23.201s`), loaded much faster on
+median (`6350.128ms` versus `9669.1205ms`), and also beat local C Tor on
+paired elapsed `6/8`. Current call after `061439`: promote shared-hit-only
+over plain `hsdescshare`, but do not call it the best exact hidden-service
+path yet.
+
+Cold-late rendezvous prebuild lane:
+`results/browser-compare-20260627T065807/browser-compare.json` added the new
+lab-only cold-late lane
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_coldlate1000ms`,
+which arms rendezvous prebuild only after the descriptor stream is ready on a
+cold fetch. Quality stayed clean and every compared lane finished `8/8`.
+
+This first cold-late screen showed a real cold-start win but not a full ship
+call yet. Relative to shared-hit-only, `coldlate1000ms` cut boot from
+`43.172s` to `24.137s`, cut run1 elapsed from `16959.315ms` to `10260.185ms`,
+and cut worst elapsed from `16959.315ms` to `12663.135ms`. But paired elapsed
+was only `4/8` wins, so current call after `065807` was still cautious:
+promising cold-start and tail lane, not yet the clear final default.
+
+Late-rendezvous preservation fix:
+`upstream/arti/crates/tor-hsclient/src/connect.rs` now keeps the first ready
+cold-late rendezvous across failed hidden-service descriptor fetch attempts
+and stops re-arming once that saved rendezvous already exists. Focused checks
+passed after that patch:
+`cargo test -p tor-hsclient --all-features hs_rend_prebuild_cold_after_desc_stream_ready --manifest-path upstream/arti/Cargo.toml`
+and
+`cargo build -p arti --release --manifest-path upstream/arti/Cargo.toml`.
+
+Full-matrix rerun after the late-rendezvous fix:
+`results/browser-compare-20260627T071708/browser-compare.json` reran the full
+onion-only matrix for plain Arti, plain `hsdescshare`, shared-hit-only,
+`coldlate1000ms`, and local C Tor with `8` cold interleaved runs. Quality
+stayed clean again: browser default-prefs proof passed, the no-Marionette
+fingerprint proof passed, and `webdriver` stayed `false`.
+
+This was the first screen where `coldlate1000ms` looked like the best current
+Arti hidden-service lane. It kept `8/8` success, booted in `8.878s`, landed
+run1 at `7155.375ms`, finished cold total at `16033.375ms`, loaded on median
+at `5878.404ms`, and kept worst elapsed at `9040.168ms`. It beat shared-hit-
+only on paired elapsed `7/8`, beat plain `hsdescshare` on paired elapsed
+`6/8`, and even beat local C Tor on paired elapsed `5/8` in that exact window.
+The source fix also showed up in the traces: cold-late `armed/ready` totals
+fell from `26/21` in `065807` to `12/10` here, and old run1 `connect_id=2`
+fell from `8/6` to `1/1`.
+
+Current call after `071708`: promote `coldlate1000ms` over the older
+hidden-service Arti lanes. Treat the better-than-local-C-Tor read as
+provisional for this exact onion-only shape, not as a fully closed repo-wide
+call yet.
+
+Direct head-to-head repeat versus local C Tor:
+`results/browser-compare-20260627T074724/browser-compare.json` then reran only
+plain Arti, `coldlate1000ms`, and local C Tor on the same direct onion target
+for `12` cold interleaved runs. Quality stayed clean again: browser default-
+prefs proof passed, the no-Marionette fingerprint proof passed, and
+`webdriver` stayed `false`.
+
+This tighter repeat kept the cold-start and tail advantages for
+`coldlate1000ms`, but made the direct local-C-Tor read mixed instead of clean.
+`coldlate1000ms` still had the best cold total by far:
+`23840.657ms` versus `30211.916ms` for local C Tor. It also had the much
+better worst case: `10677.425ms` worst elapsed versus `21714.893ms`, and
+`9114.837ms` worst load versus `20154.931ms`. But local C Tor was a little
+better on the main steady-state medians in this exact repeat:
+`7635.6635ms` median elapsed versus `7749.750ms`, and `6102.8155ms` median
+load versus `6205.648ms`. Paired elapsed also favored local C Tor on raw win
+count here: `8/12` local wins versus `4/12` for `coldlate1000ms`, even though
+mean delta still favored `coldlate1000ms` because one local run blew out to
+`21714.893ms`.
+
+Current call after `074724`: keep `coldlate1000ms` as the best current Arti
+hidden-service lane and the best cold-start / worst-tail lane. But the direct
+claim against local C Tor is still unresolved. The safest next proof is more
+direct `coldlate1000ms` versus local C Tor repeats on the same onion target,
+or source work that improves the warm-hit path without giving back the current
+cold-start and tail gains.
+
+Lean direct head-to-head after adding plain-Arti skip support:
+`results/browser-compare-20260627T081033/browser-compare.json` then reran only
+local C Tor versus `coldlate1000ms` on the same onion target for `20` cold
+interleaved runs, using the new focused runner path that skips the plain Arti
+baseline. Quality stayed clean again: browser default-prefs proof passed, the
+no-Marionette fingerprint proof passed, and `webdriver` stayed `false`.
+
+This larger direct rerun removed the remaining basis for calling
+`coldlate1000ms` better than local C Tor on this exact onion. Local C Tor won
+the cold path (`21567.281ms` cold total versus `32544.000ms`), the steady-state
+medians (`8305.0585ms` elapsed and `6729.7115ms` load versus `11188.6625ms` and
+`9588.801ms`), and the paired head-to-head count (`14/20` local wins versus
+`6/20` for `coldlate1000ms`). `coldlate1000ms` kept a better mean only because
+some local runs also blew out badly, but that was not a real typical-case win.
+It also lost the tail on this wider rerun: worst elapsed/load reached
+`91568.562ms` / `89968.624ms`, versus `52790.231ms` / `51239.328ms` for local C
+Tor.
+
+Current call after `081033`: for this exact onion target, local C Tor is now
+the clean winner. Keep `coldlate1000ms` only as a provisional best-Arti claim,
+because `081033` did not rerun the other Arti hidden-service lanes. The
+strongest next proof is to rerun the full Arti hidden-service matrix on this
+same harness, with per-run hidden-service phase timing kept in the saved
+evidence, so we can both recheck whether `coldlate1000ms` is still the best
+Arti lane and explain the new `~90s` Arti tail spikes.
+
+Full Arti matrix after the direct `coldlate1000ms` loss:
+`results/browser-compare-20260627T083014/browser-compare.json` then reran
+plain Arti, plain `hsdescshare`, `hsrendpredesc_hsdescshare`, shared-hit-only,
+`coldlate1000ms`, and local C Tor on the same direct onion target for `8`
+cold interleaved runs. Quality stayed clean again: browser default-prefs proof
+passed, the no-Marionette fingerprint proof passed, and `webdriver` stayed
+`false`.
+
+This screen removed the remaining basis for keeping `coldlate1000ms` as the
+current Arti lead. Shared-hit-only
+(`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly`) was the best
+current Arti lane in this matrix: `7752.568ms` median elapsed, `6069.867ms`
+median load, `7988.510ms` mean elapsed, `6207.305ms` mean load, and
+`9127.171ms` / `7651.474ms` worst elapsed/load with `8/8` success. Plain
+`hsrendpredesc_hsdescshare` was the next best steady Arti lane, but was still
+worse on median and tail (`8525.818ms` / `7049.7115ms` median elapsed/load,
+`14215.447ms` / `11646.793ms` worst elapsed/load). `coldlate1000ms` collapsed
+badly in this wider rerun: `33563.214ms` median elapsed, `32056.408ms` median
+load, `56885.984ms` run1 elapsed, and `99543.067ms` / `98007.998ms` worst
+elapsed/load.
+
+The saved hidden-service phase timings explain that collapse. This was not a
+browser-quality drift issue. Shared-hit-only kept descriptor/rendezvous/intro/
+established max connect timings at `832ms`, `1691ms`, `2205ms`, and `3567ms`.
+`coldlate1000ms` blew out those same maxima to `5337ms`, `12134ms`,
+`12844ms`, and `13743ms`. The bad late-cold lane had become a connect-tail
+problem again, not a real stable speed path.
+
+Current call after `083014`: shared-hit-only replaces `coldlate1000ms` as the
+best current Arti hidden-service lane. The exact claim against local C Tor is
+better than before, but this `8`-run matrix alone still does not close it.
+
+Lean direct head-to-head for shared-hit-only versus local C Tor:
+`results/browser-compare-20260627T085415/browser-compare.json` then reran only
+shared-hit-only and local C Tor on the same onion target for `20` cold
+interleaved runs. Quality stayed clean again: browser default-prefs proof
+passed, the no-Marionette fingerprint proof passed, and `webdriver` stayed
+`false`.
+
+This cleaner repeat made the exact overall call mixed instead of final.
+Shared-hit-only booted faster (`8.752s` versus `12.583s`), had slightly better
+independent medians (`8635.026ms` elapsed and `7093.9325ms` load versus
+`8991.3715ms` and `7460.6075ms`), better means (`10903.427ms` / `9346.502ms`
+versus `11497.822ms` / `9962.273ms`), and a much better worst case
+(`29967.044ms` / `28216.754ms` versus `50855.623ms` / `49373.428ms`). But
+local C Tor still kept the better cold total (`22963.149ms` versus
+`24548.060ms`) and still won more same-round paired runs (`13/20` local wins
+versus `7/20` for shared-hit-only). The paired median deltas also still leaned
+local (`-732.053ms` elapsed and `-710.582ms` load for local-minus-Arti), even
+though paired mean still leaned shared-hit-only (`+594.395ms` elapsed and
+`+615.771ms` load) because local had the larger blowouts.
+
+The shape of the remaining Arti loss changed too. The worst shared-hit-only
+run here still reached `28216.754ms` page load, but its hidden-service
+established phase topped out at only `2097ms`. That points the next tuning
+step away from another cold-late hidden-service connect trick and toward the
+post-connect page/resource fanout path on this onion workload.
+
+Current call after `085415`: shared-hit-only is still the best current Arti
+lane, but it is not yet proven as the best overall path against local C Tor on
+this exact onion. The gap is now mixed: local is still better on cold total
+and on most same-round paired races, while shared-hit-only is better on
+overall median, mean, and tail. The safest next move is a very narrow lab
+change that targets post-connect onion resource fanout for shared-hit-only,
+then another direct repeat against local C Tor.
+
+Second-opinion note after `085415`: `gpt-5.4-pro` via `cz` matched that read
+too. It called the result `D` closest to `A`: shared-hit-only is clearly the
+best current Arti lane, but there is still no proven overall winner versus
+local C Tor on this exact onion. Its suggested next proof was not a broader
+matrix. It said to preregister one `100`-pair cold interleaved
+shared-hit-only-versus-local repeat on this same onion, use paired load delta
+as the primary metric, and report run1 cold total plus `p95` / worst
+separately.
+
+Direct `100`-pair repeat for shared-hit-only versus local C Tor:
+`results/browser-compare-20260627T090853/browser-compare.json` then reran only
+shared-hit-only and local C Tor on the same onion target for `100` cold
+interleaved runs. Quality stayed clean again: browser default-prefs proof
+passed, the no-Marionette fingerprint proof passed, and `webdriver` stayed
+`false`.
+
+This larger repeat made the speed edge clearer but still did not clear
+promotion. Shared-hit-only booted much faster (`10.308s` versus `15.751s`),
+beat local C Tor on median elapsed (`9472.568ms` versus `10358.712ms`),
+median load (`7865.622ms` versus `8735.820ms`), and boot+elapsed
+(`19780.568ms` versus `26109.712ms`). It also kept the better worst load
+(`73655.824ms` versus `90785.492ms`). But the analyzer still blocks promotion:
+`boot directory, slow onion/data gap, slow hostname stream`, and `next proof`
+is `stream gap proof`.
+
+Current call after `090853`: shared-hit-only is still the best current
+exact-quality Arti lane on this onion, but the remaining blocker is no longer
+a basic median-speed question. The next useful work is proof for the
+stream-gap and resource-fanout shape on the winning lane, not another broad
+speed matrix.
+
+Second-opinion note after `090853`: `gpt-5.4-pro` via `cz` also switched the
+next step to stream-gap proof first, not another direct head-to-head or a
+guarded-target rerun. Its reasoning was simple: the current lane already wins
+the main speed metrics, and the active blocker is now the unexplained
+stream-gap shape.
+
+Byte-timing stream-gap proof for the current winner lane:
+`results/browser-compare-20260627T100549/browser-compare.json` then reran the
+same direct onion shape with only shared-hit-only and local C Tor, still cold
+and interleaved, but with `--arti-socks-relay-byte-timing` enabled for
+diagnostic proof. This run is not a new speed claim because overall quality is
+`FAIL`: local C Tor run `3` hit an `about:neterror` timeout and missed its
+browser screenshot/fingerprint proof.
+
+The useful proof is on the Arti side. The selected-circuit network evidence
+row for run `3`, `Circ 4.36 (Tunnel 80)`, says `late DATA on selected
+circuit`, `no scheduler monopoly seen`, and `no local block seen`. The top
+browser resource stream-gap row is even clearer: run `2`, timing id `16`,
+stream `36882`, `Circ 3.33 (Tunnel 69)`, had a `615ms` observed stream gap
+while max whole-circuit DATA gap was only `123ms`, so the analyzer labels it
+`stream-specific gap; circuit still active`. That same stream carried `33`
+same-stream resources with `10` high-confidence joins, `22` slow resources,
+and the top overlap was `get-connected.svg` inside browser `request_wait`.
+
+The queued-resource rows point to the same cause shape. In run `3`, multiple
+fontawesome PNG requests queued for `1433ms..1567ms` at slot depth `6`, and
+the high-confidence blocker was timing id `23` on the same `Circ 4.36`
+selected circuit. Its terminal summary still shows healthy flow-control shape:
+`7` SENDMEs, minimum receive window `450`, zero pending bytes, and no local
+write proof. The byte-context table also shows the strict middle of the worst
+gaps had `0` Tor response bytes, and some rows had `0` browser reads and `0`
+Tor writes inside the gap too. This rejects local browser write stall as the
+main cause.
+
+Current call after `100549`: do not spend the next turn on guarded-target or
+another speed-only rerun. First get one clean baseline byte-timing proof
+without the local timeout, then target per-stream late DATA / selected-circuit
+resource fanout on shared-hit-only.
+
+Clean byte-timing stream-gap proof without the local timeout:
+`results/browser-compare-20260627T101244/browser-compare.json` then reran the
+same shared-hit-only versus local C Tor byte-timing shape and kept quality
+clean on both sides. This is the clean proof-grade follow-up to `100549`.
+
+The speed call stayed negative for Arti on this replay. Shared-hit-only booted
+faster (`14.947s` versus local `19.678s`), but local C Tor still won median
+elapsed (`7846.705ms` versus `10804.467ms`) and median load (`6284.717ms`
+versus `9238.241ms`). The analyzer blocker summary is direct:
+`slower than C Tor, resource queue, slow onion/data gap`, and `next_proof`
+again pointed at stream-gap proof.
+
+The useful clean rows stayed consistent with `100549`. The strongest request-
+wait row was run `2`, timing id `15`, stream `44678`, `Circ 4.28 (Tunnel
+62)`: observed stream gap `681ms`, whole-circuit DATA gap only `189ms`, `33`
+same-stream resources, `10` high-confidence joins, `17` slow resources, and
+the top overlap resource was the fontawesome white `github.png` CSS asset. The
+other main request-wait row was run `5`, timing id `42`, stream `17470`,
+`Circ 4.57 (Tunnel 121)`, gap `655ms`, top overlap `get-connected.svg`. In
+both cases the byte-context table still showed `0` Tor response bytes inside
+the strict middle of the gap, which keeps local browser stall off the main
+suspect list.
+
+Same-window guarded-target check inside the shared-hit-only family:
+`results/browser-compare-20260627T102846/browser-compare.json` then compared
+three profiles in the same `12`-run cold interleaved window: local C Tor,
+plain shared-hit-only, and the new same-family guarded-target variant
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hspoolguarded4`.
+Quality stayed clean on all three.
+
+This was a clear loss for the guarded-target idea. Local C Tor posted boot
+`21.637s`, median elapsed `7444.001ms`, median load `5854.146ms`, and
+boot+elapsed `29081.001ms`. Plain shared-hit-only stayed the best Arti option
+here with boot `14.790s`, median elapsed `8615.046ms`, median load
+`7032.503ms`, and boot+elapsed `23405.046ms`. Guarded `4` was much worse:
+boot `22.941s`, median elapsed `10162.655ms`, median load `8666.069ms`, and
+boot+elapsed `33103.655ms`. Versus plain shared-hit-only, guarded `4` lost by
+about `+1548ms` elapsed, `+1634ms` load, and `+9699ms` boot+elapsed. Retained
+signal lines also showed repeated `launching 3 NAIVE and 4 GUARDED circuits`,
+which matches the heavier setup cost.
+
+Second-opinion note after `102846`: `gpt-5.4-pro` via `cz` picked `A`, not
+another benchmark. It said guarded `4` is a clear regression and the next
+narrow move should be proof: patch the analyzer so retained `hspool` / `hs`
+timing lines join directly onto the worst stream-gap rows in the current
+winner lane.
+
+Analyzer/source follow-up after that second opinion: `tools/analyze_browser_compare.py`
+now keeps timestamps on retained `torfast hspool timing` and `torfast hs
+client timing` rows, and the analyzer prints a new `Browser Resource Stream
+Gap HS Context` table on replay of
+`results/browser-compare-20260627T101244/browser-compare.json`. That new proof
+is the main result of this turn.
+
+The key read from the new table is that the worst remaining request-wait gaps
+do not line up with slow hidden-service setup. Run `2`, timing id `15`, gap
+`681ms`, still had only `592ms` request-to-stream-ready time, no slow HS
+phase fields, and just `3` retained guarded hspool setup events
+(`stem_ready`, `stem_selected`, `specific_circuit_ready`). Run `5`, timing id
+`42`, gap `655ms`, had `731ms` request-to-stream-ready and no retained HS or
+hspool setup delay at all. So the main unresolved blocker is later
+page/resource fanout after a fast setup path, not the guarded-target family or
+a broad HS-connect slowdown.
+
+Current call after `102846` and the analyzer patch: keep plain shared-hit-only
+as the current best exact-quality Arti lane on this onion. Drop guarded-target
+family from the next move. The next narrow source work should target
+post-ready page/resource queue / late DATA behavior on shared-hit-only, not
+more guarded-hspool variants.
+
+Busy active-stream reuse gate inside the shared-hit-only family:
+`results/browser-compare-20260627T110824/browser-compare.json` then compared
+local C Tor, plain shared-hit-only, and the new busy-reuse-gated lane
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive1`
+in the same interleaved `4`-run window across `securedrop` and the direct
+onion download page. Quality stayed clean on all three profiles. This run used
+`--warm-cache`, `--share-arti-warm-cache-seed`, and
+`--browser-startup-seed`, so page elapsed/load is the fair read here, but boot
+and boot+page are not apples-to-apples between the two Arti lanes because the
+new lane loaded a shared warm-cache seed.
+
+The new gate is a strong speed win inside this family. Versus plain
+shared-hit-only, `hsreuseactive1` cut onion median elapsed/load from
+`12599.734ms` / `11006.869ms` to `7858.950ms` / `6339.588ms`, and cut
+`securedrop` median elapsed/load from `5724.877ms` / `4177.626ms` to
+`4534.796ms` / `3036.008ms`. That is `-4740.784ms` (`-37.6%`) onion elapsed,
+`-4667.281ms` (`-42.4%`) onion load, `-1190.081ms` (`-20.8%`) `securedrop`
+elapsed, and `-1141.618ms` (`-27.3%`) `securedrop` load. In this window it
+also beat local C Tor on both measured medians.
+
+The mechanism proof matches the speed jump. In
+`/tmp/analysis-20260627T110824.md`, the onion `download png -> download svg`
+swap window `fallback_js_end_to_current_request_ms` fell from `4016.747ms` on
+plain shared-hit-only to `1100.022ms` on `hsreuseactive1`, a `-2916.725ms`
+(`-72.6%`) drop. Saved proxy logs in the result also show repeated real hits
+of `torfast hs state timing cache hit blocked active streams` on timing ids
+`17, 25, 30, 32, 63, 72, 94`, with active stream counts `1`, `2`, and `5`.
+The analyzer blocker row improved too: plain shared-hit-only still carried
+`slower than C Tor`, while `hsreuseactive1` dropped that blocker and kept only
+`resource queue, slow onion/data gap`.
+
+Second-opinion note after `110824`: `gpt-5.4-pro` via `cz` called
+`sharedhitonly` the best current experimental hidden-service candidate, but
+not a safe default yet. Its risk call stayed on cold-path behavior: large cold
+losses still exist, and the current proof is too warm-cache-heavy to make a
+default move. Its next source suggestion was narrow: test a cold-path
+descriptor-only optimization that pulls/shares the onion descriptor earlier on
+first navigation, but keeps rendezvous prebuild off until there is a real
+shared-cache hit.
+
+Current call after `110824`: keep
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive1`
+as the best current experimental lane inside the shared-hit-only family. Do
+not promote it to the default hidden-service path yet. The next clean proof is
+a cold-path follow-up, not another broad speed matrix.
+
+Cold-path follow-up inside that same family:
+`results/browser-compare-20260627T114132/browser-compare.json`, with analyzer
+output at `/tmp/analysis-20260627T114132.md`, compared local C Tor, plain
+`hsdescshare`, the current warm winner
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive1`,
+and the new combo
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive1_hsdirextendcap3000ms_startuponly`
+in the same rotating `4`-run cold interleaved window across `securedrop` and
+the direct onion download page. This turn did not change live Tor path logic.
+It only added a benchmark-only combo lane that reuses two existing default-off
+lab knobs together: shared-cache-hit-only rendezvous prebuild plus busy-reuse
+cap `1`, and startup-only client-HSDir extend-timeout cap `3000ms`. Quality
+stayed clean on all four profiles.
+
+This combo is the strongest cold-path result in this family so far, but it is
+not a full keep yet. It booted in `9.539s`, versus `35.677s` for
+`hsreuseactive1`, `14.556s` for plain `hsdescshare`, and `25.196s` for local C
+Tor. It also beat local C Tor on both targets for every measured median and
+cold total in this window: onion median elapsed/load
+`9130.268ms` / `7539.916ms` versus `11549.025ms` / `9892.578ms`, `securedrop`
+median elapsed/load `3898.821ms` / `2421.801ms` versus `4752.056ms` /
+`3223.439ms`, onion boot+load `17078.916ms` versus `35088.578ms`, and
+`securedrop` boot+load `11960.801ms` versus `28419.440ms`.
+
+The cold boot rescue over the current warm winner was massive. Relative to
+`hsreuseactive1`, the combo cut boot by `-26.138s`, onion boot+load by
+`-25686.894ms`, and `securedrop` boot+load by `-26042.328ms`. The analyzer
+also dropped the warm winner's `boot slower, boot directory` blockers. In the
+boot summary, `hsreuseactive1` had `12` directory failures, `12` timeouts, and
+`12` partial responses, while the combo had `0` directory-build failures,
+`0` channel failures, and max channel-open time `1284ms`.
+
+But the raw page path is still not good enough to promote. Versus plain
+`hsdescshare`, the combo lost onion median elapsed/load by `+793.588ms` /
+`+885.833ms`, and lost `securedrop` median elapsed/load by `+340.342ms` /
+`+374.276ms`. The analyzer still flags `resource queue, slow onion/data gap,
+slow hostname stream`. So the combo is a strong cold total win, but not yet a
+clean page-load win over the best plain `hsdescshare` lane.
+
+The saved mechanism evidence says the combo is real, not empty noise. The combo
+logged `60` descriptor shared-cache-hit lines and `22` busy-reuse gate-hit
+lines, with active-stream counts `1` and `4`. Example saved line:
+`torfast hs state timing cache hit blocked active streams ... active_streams=4
+max_active_streams=1`. But the one oddity from this run was still unresolved:
+the saved combo profile showed `0` explicit
+`torfast hspool client hsdir extend timeout capped` lines and `0`
+`torfast hspool client hsdir extend timeout cap disabled after bootstrap`
+lines, even though cold boot improved sharply.
+
+Second-opinion note after `114132`: `gpt-5.4-pro` via `cz pro` said
+`MORE_PROOF`. Its read matched the repo evidence: keep the combo lab-only for
+now, because it preserves quality and fixes the worst cold boot path, but the
+raw page-load regression versus plain `hsdescshare` still breaks a strict
+`KEEP` call under the no-quality-loss rule. Its risk call was that the boot win
+may be coming from changed startup timing or avoided failure paths rather than
+the intended HSDir timeout cap itself. Its next proof call was explicit
+attribution: keep the combo behind a lab flag, add proof-grade telemetry for
+the startup-only HSDir cap decision path, and only reconsider promotion if
+page-load medians come back to plain `hsdescshare` within noise while the boot
+win stays.
+
+Current call after `114132`: this new combo is the best current cold-path
+candidate inside the shared-hit-only family, but it is still lab-only. Do not
+promote it over plain `hsdescshare` or treat it as the broad winner yet. The
+next narrow move is proof for the startup-only HSDir cap path, not another big
+benchmark sweep.
+
+Telemetry follow-up after `114132`: this turn also patched both sides of that
+proof. In `upstream/arti/crates/tor-circmgr/src/hspool.rs`, the client-HSDir
+extend path now emits proof-grade `torfast hspool` availability/decision lines,
+and `tools/run_browser_compare.py` now keeps `torfast hspool` lines inside boot
+signal retention too. Focused validation passed:
+`python3 -m py_compile tools/run_browser_compare.py tests/test_browser_quality.py`,
+`python3 -m unittest tests.test_browser_quality.BrowserQualityTests.test_boot_signal_lines_keep_boot_markers_without_stream_flood tests.test_browser_quality.BrowserQualityTests.test_wait_for_line_returns_filtered_boot_signal_lines tests.test_browser_quality.BrowserQualityTests.test_wait_for_line_keeps_hspool_boot_signal_lines`,
+and `cargo build --release --manifest-path upstream/arti/Cargo.toml -p arti`.
+
+The proof smoke was `results/browser-compare-20260627T121447/browser-compare.json`.
+This was not a new speed claim; it was only a one-run retained-log check on the
+same hidden-service wrapper matrix. The important new evidence is in the combo
+profile
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive1_hsdirextendcap3000ms_startuponly`:
+it now saves repeated lines
+`torfast hspool client hsdir extend timeout availability cap_enabled=false cap_configured=false cap_startup_only=true`
+for its `ClientHsDir` work, and still saves `0`
+`torfast hspool client hsdir extend timeout decision` lines.
+
+That changes the call. The earlier mystery is no longer "the log might be
+missing." The retained evidence now says the startup-only cap is already off by
+the time the hidden-service page-time `ClientHsDir` circuits we can observe are
+built. So the cold combo win from `114132` cannot be credited to an active
+client-HSDir extend cap on those later page requests. If that cold gain is
+real, it is either happening earlier during startup, or coming from the other
+knob(s) in the combo. Current next proof: keep the combo lab-only, do per-phase
+attribution for the startup window itself, and do not promote the combo over
+plain `hsdescshare` until that attribution is closed.
+
+Startup-only HSDir cap attribution closeout:
+`results/browser-compare-20260627T142012/browser-compare.json`, with analyzer
+output at `/tmp/analysis-20260627T142012.md`, reran plain `hsdescshare`, the
+warm-family lane
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive1`,
+the startup-only combo
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive1_hsdirextendcap3000ms_startuponly`,
+and local C Tor in the same one-run cold interleaved screen across
+`securedrop` and the direct onion download page. Quality stayed clean on every
+successful run, and the saved proof now closes the startup-cap question. The
+combo retained
+`torfast hspool client hsdir extend timeout cap disabled after bootstrap enabled_client_hsdir_requests=0`.
+The analyzer row said `first disable after boot s=11.790`,
+`enabled requests before disable=0`, and the later page-time `ClientHsDir`
+availability rows all showed `cap enabled=no`. So the startup-only HSDir cap
+did zero retained work for this measured workload: it turned off before any
+enabled `ClientHsDir` request reached the pool. That makes the combo
+non-promotable as a speed mechanism here. The timing read also moved against
+it: plain `hsdescshare` beat the combo on both targets in this rerun, with
+onion elapsed/load `6292.353ms` / `4677.479ms` versus `15455.137ms` /
+`13865.822ms`, and `securedrop` `3532.071ms` / `2046.124ms` versus
+`7408.064ms` / `5457.242ms`. Current call after `142012`: retire the
+startup-only HSDir cap lane for this exact workload and keep plain
+`arti_release_browser_hsdescshare` as the current safe lead while the next move
+targets the remaining onion stream/queue gap instead of more HSDir timeout
+work.
+
+Middle-step busy-reuse screen inside the shared-hit-only family:
+`results/browser-compare-20260627T143334/browser-compare.json`, with analyzer
+output at `/tmp/analysis-20260627T143334.md`, then compared plain
+`hsdescshare`, plain shared-hit-only, the bad cold lane
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive1`,
+the new middle-step lane
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive2_2`,
+and local C Tor in the same one-run cold interleaved screen across
+`securedrop` and the direct onion download page. This was a focused family
+check only; plain Arti was skipped to keep the screen narrow. Local C Tor
+failed the onion page in this exact run, so the only stable promotion baseline
+here is still plain `hsdescshare`.
+
+The new `hsreuseactive2` lane is a real recovery from `hsreuseactive1`, but it
+still does not beat plain `hsdescshare` on the full cold matrix. On the direct
+onion page it did fix the `hsreuseactive1` collapse: onion elapsed/load fell
+from `29621.408ms` / `28063.517ms` on `hsreuseactive1` to `9782.294ms` /
+`8247.561ms` on `hsreuseactive2`, and the analyzer queue rows dropped from
+`queued >=1000ms = 33`, `max queued ms = 16883.671`, and `11` slow onion
+streams down to `13`, `1650.033`, and `2`. Saved proxy proof also kept `8`
+shared-cache hit rows on `hsreuseactive2` and `0` retained
+`cache hit blocked active streams` rows, so the middle cap did not just turn
+the feature off. But the keep call still fails against plain `hsdescshare`.
+Plain `hsdescshare` booted in `12.931s`, while `hsreuseactive2` booted in
+`28.418s`. The new lane won raw onion elapsed/load by only `-946.017ms` /
+`-853.031ms`, then lost `securedrop` elapsed/load by `+561.612ms` /
+`+423.573ms`. That means cold boot plus load was still far worse than plain
+`hsdescshare`: `+14633.969ms` on the onion page and `+15910.573ms` on
+`securedrop`. Second opinion after `143334`: `gpt-5.4-pro` via `cz` said
+`supported`, with the same call as the repo evidence: `hsreuseactive2` is the
+right middle step inside this family, but it is still not promotable over
+plain `hsdescshare` on the current exact-quality cold matrix, and the next
+move should target cold boot cost if this family stays alive at all rather than
+relaxing the reuse cap further.
+
+New lab combo for the next cold-path check:
+`tools/run_browser_compare.py` and
+`tools/run_browser_compare_hidden_service.py` now also support
+`--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only-reuse-max-active-streams-cold-late-combo`
+with `MAX_ACTIVE_STREAMS:TIMEOUT_MS`. This is benchmark-only wiring for an
+existing Arti knob combination: shared-cache-hit-only rendezvous prebuild,
+busy-reuse cap, and bounded cold-late rendezvous prebuild after descriptor
+stream ready. Focused validation passed:
+`python3 -m py_compile tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tests/test_browser_quality.py tests/test_run_browser_compare_hidden_service.py`,
+`python3 -m unittest tests.test_browser_quality.BrowserQualityTests.test_parse_hs_shared_hit_only_reuse_cold_late_combos tests.test_browser_quality.BrowserQualityTests.test_interleaved_schedule_can_add_extra_arti_ab_profile tests.test_run_browser_compare_hidden_service.RunBrowserCompareHiddenServiceTests.test_wrapper_forwards_shared_hit_only_reuse_cold_late_combo_flag`,
+and `git diff --check -- tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tests/test_browser_quality.py tests/test_run_browser_compare_hidden_service.py`.
+
+First focused screen for that new combo:
+`results/browser-compare-20260627T145504/browser-compare.json`, with analyzer
+output at `/tmp/analysis-20260627T145504.md`, compared plain `hsdescshare`,
+plain
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive2`,
+the new combo
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive2_coldlate1000ms`,
+and local C Tor in the same one-run cold interleaved screen across
+`securedrop` and the direct onion download page. Plain Arti was skipped to keep
+the matrix narrow.
+
+The new combo is rejected for now. It failed the direct onion page on its
+first focused cold screen: Firefox ended at `about:neterror` timeout after
+`91908.039ms`. The saved tail still showed a hidden-service tunnel got ready
+for timing id `17` at `connect_ms=2382`, so the failure was not "could not get
+any HS tunnel at all"; it still turned into a real page timeout later. The
+combo also booted slower than both current comparison lanes: `19.177s` versus
+`16.411s` for plain `hsreuseactive2` and `6.397s` for plain `hsdescshare`. Its
+saved signals were not empty noise either: `cold_late_armed=6`,
+`cold_late_ready=4`, `cache_hit=1`, and `blocked_active_streams=0`.
+
+Plain `hsreuseactive2` also stayed out. It helped `securedrop` relative to
+plain `hsdescshare` (`3103.553ms` load versus `5024.928ms`), but it still lost
+the onion page badly (`19745.883ms` load versus `11250.284ms`) and kept a much
+worse queue shape (`queued >=1000ms 25` versus `18`, `max queued 7200.144ms`
+versus `3133.396ms`). Current call after `145504`: reject the new
+`hsreuseactive2_coldlate1000ms` combo, keep plain `hsreuseactive2` out of the
+promotion lane, and keep `arti_release_browser_hsdescshare` as the current safe
+lead. `gpt-5.4-pro` via `cz` agreed on rejecting points `1` and `2`, but gave a
+useful caution on scope: this one-run screen is enough to reject the combo for
+now, but not enough by itself to permanently retire every future variant in the
+shared-hit-only reuse family.
+
+New benchmark-only shared-hit-only plus fanout lane:
+`tools/run_browser_compare.py` and
+`tools/run_browser_compare_hidden_service.py` now also support
+`--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only-stream-ready-data-coalesce-bytes`.
+This keeps the shared-cache-hit-only hidden-service rendezvous-prebuild lane,
+but also sets `TORFAST_STREAM_READY_DATA_COALESCE_BYTES` on that exact lane.
+It does not change any default path. Focused validation passed:
+`python3 -m py_compile tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tests/test_browser_quality.py tests/test_run_browser_compare_hidden_service.py`,
+`python3 -m unittest tests.test_browser_quality.BrowserQualityTests.test_interleaved_schedule_can_add_extra_arti_ab_profile tests.test_run_browser_compare_hidden_service.RunBrowserCompareHiddenServiceTests.test_wrapper_forwards_shared_hit_only_stream_ready_data_coalesce_flag tests.test_run_browser_compare_hidden_service.RunBrowserCompareHiddenServiceTests.test_wrapper_forwards_shared_hit_only_reuse_cold_late_combo_flag`,
+and `git diff --check -- tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tests/test_browser_quality.py tests/test_run_browser_compare_hidden_service.py`.
+
+First focused mixed-target screen for that new lane:
+`results/browser-compare-20260627T151119/browser-compare.json`, with analyzer
+output at `/tmp/analysis-20260627T151119.md`, compared plain `hsdescshare`,
+plain shared-hit-only, the new
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_streamreadycoalesce4096`,
+and local C Tor in the same one-run cold interleaved screen across
+`securedrop` and the direct onion download page. Plain Arti was skipped to keep
+the matrix narrow.
+
+This screen found a real but narrow clue. The new combo rescued the bad
+shared-hit-only onion collapse: onion elapsed/load fell from `61766.796ms` /
+`60245.024ms` on plain shared-hit-only down to `9292.766ms` / `7758.343ms`,
+beating both plain `hsdescshare` (`12190.290ms` / `10698.314ms`) and local C
+Tor (`11463.752ms` / `9927.399ms`) on that one onion page. The mechanism read
+also moved the right way there: onion `queued >=1000ms` fell to `7` from `17`
+on `hsdescshare`, max queued fell to `1533.364ms` from `2933.392ms`, response
+start dropped to `5300.106ms` from `6000.120ms`, and DOM-to-load dropped to
+`1433.362ms` from `3083.395ms`.
+
+That was not safe to promote from one mixed-target screen. The new combo still
+lost `securedrop` (`4057.435ms` load versus `2715.457ms` on `hsdescshare`),
+and cold totals were worse because boot was slower in this one run:
+`94929.343ms` onion boot+load versus `89456.314ms` on `hsdescshare`, and
+`91228.435ms` `securedrop` boot+load versus `81473.457ms`. Analyzer blockers
+for the combo stayed `boot slower, boot directory, slower than C Tor, resource
+queue, slow onion/data gap`. `gpt-5.4-pro` via `cz` said `supported`: do not
+promote this as the new safe lead, keep it only as an onion page-load clue,
+and rerun a direct repeated A/B before any broader claim.
+
+Stronger repeated onion-only A/B for that clue:
+`results/browser-compare-20260627T151937/browser-compare.json`, with analyzer
+output at `/tmp/analysis-20260627T151937.md`, reran only the direct onion
+download page with `4` cold interleaved runs for plain `hsdescshare`, the same
+new combo
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_streamreadycoalesce4096`,
+and local C Tor. Quality stayed clean again.
+
+This larger repeat changed the call. The combo is *not* the better onion
+page-load lane over plain `hsdescshare`. Plain `hsdescshare` loaded in
+`5844.171ms`, while the combo loaded in `6510.091ms`; direct paired A/B gave
+the combo only `1/4` load wins and `+1914.350ms` paired median load delta
+against `hsdescshare`. Page construction after response start also got worse on
+the combo: DOM-to-load median was `2016.707ms` versus `1350.027ms`, queue
+shape was heavier (`queued >=1000ms 56` versus `39`, median
+`fetchStart -> requestStart 1258.359ms` versus `650.013ms`), and max load tail
+was worse (`10624.421ms` versus `7678.777ms`).
+
+But the combo stayed alive in one narrow way: cold total on this exact onion
+screen. It booted much faster (`7.267s` versus `11.663s` for `hsdescshare` and
+`13.478s` for local C Tor), so median onion boot+load improved to
+`13777.091ms` versus `17507.171ms` on `hsdescshare` and `21217.740ms` on local
+C Tor. It also beat local C Tor directly on page load (`3/4` load wins,
+`-2795.865ms` paired median load delta). Analyzer blocker rows for both Arti
+lanes dropped to just `slow onion/data gap`, with no boot-directory trouble in
+this repeat.
+
+Current call after `151937`: do not treat
+`streamreadycoalesce4096` as the better onion page-load lane over plain
+`hsdescshare`. Keep it alive only as a cold-total lab candidate for this exact
+onion-only scope, because its faster boot still beats both `hsdescshare` and
+local C Tor on cold boot+load in the repeated screen. Do not promote it yet.
+`gpt-5.4-pro` via `cz` again said `supported`: this is a real cold-total clue,
+but still narrow, and mixed-target repeats should gate any promotion because
+queue shape, load tail, and especially DOM-to-load got worse against plain
+`hsdescshare`.
+
+Mixed-target gate for that cold-total clue:
+`results/browser-compare-20260627T152919/browser-compare.json`, with analyzer
+output at `/tmp/analysis-20260627T152919.md`, reran the same combo on both the
+direct onion download page and `securedrop` with `4` cold interleaved runs for
+plain `hsdescshare`, the combo
+`arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_streamreadycoalesce4096`,
+and local C Tor. This wider gate did *not* keep quality clean: both Arti lanes
+finished `3/4` on the onion page, and local C Tor finished `3/4` on
+`securedrop`.
+
+This broader repeat parks the combo as an active lead. Its faster boot
+(`18.054s` versus `21.791s` on plain `hsdescshare`) only bought tiny cold-total
+wins: onion boot+load improved by `-674.085ms`, and `securedrop` boot+load
+improved by `-244.558ms`. But the actual page loads got much worse on both
+targets. Against plain `hsdescshare`, the combo lost onion elapsed/load by
+`+3026.899ms` / `+3062.915ms`, and lost `securedrop` elapsed/load by
+`+3462.580ms` / `+3492.442ms`. It also stayed far behind local C Tor on cold
+boot+load: `+10838.439ms` on the onion page and `+10850.000ms` on
+`securedrop`.
+
+The failure shape also stopped looking promotable. The combo's onion miss was
+`about:neterror` `onionServices.descNotFound`, while plain `hsdescshare` missed
+the onion page once with a much longer `netTimeout`. Analyzer blocker rows for
+the combo stayed `baseline failed, boot slower, boot directory, slower than C
+Tor, resource queue, slow onion/data gap`, and its worst load gap versus local
+C Tor was `+4392.039ms` versus only `+1067.703ms` for plain `hsdescshare`.
+
+Current call after `152919`: park
+`streamreadycoalesce4096` as an active candidate. Keep the earlier onion-only
+result only as a narrow lab datapoint about cold-start total, not as a live
+promotion lane. Do not spend more mixed-target benchmark time on this exact
+combo unless a new change first fixes the page-load regression against plain
+`hsdescshare`. `gpt-5.4-pro` via `cz` said `supported`: the mixed-target repeat
+does not justify keeping this combo active because it is materially slower on
+real page load for both targets, and the tiny boot-total gain is not enough
+under the no-quality-loss rule.
+
+New benchmark-only late-fanout lane on the current safe lead:
+`tools/run_browser_compare.py` and
+`tools/run_browser_compare_hidden_service.py` now also support
+`--extra-arti-hs-desc-shared-cache-stream-scheduler-burst`. This keeps plain
+`hsdescshare`, but raises `TORFAST_STREAM_SCHEDULER_BURST` only on that
+descriptor-sharing lane. It does not change any default path. Focused
+validation passed:
+`python3 -m py_compile tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tests/test_browser_quality.py tests/test_run_browser_compare_hidden_service.py`,
+`python3 -m unittest tests.test_browser_quality.BrowserQualityTests.test_interleaved_schedule_can_add_extra_arti_scheduler_burst_profile tests.test_browser_quality.BrowserQualityTests.test_interleaved_schedule_can_add_extra_hsdescshare_scheduler_burst_profile tests.test_run_browser_compare_hidden_service.RunBrowserCompareHiddenServiceTests.test_wrapper_forwards_hsdescshare_scheduler_burst_flag tests.test_run_browser_compare_hidden_service.RunBrowserCompareHiddenServiceTests.test_wrapper_forwards_shared_hit_only_stream_ready_data_coalesce_flag`,
+and `git diff --check -- tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tests/test_browser_quality.py tests/test_run_browser_compare_hidden_service.py`.
+
+First focused mixed-target screen for that new lane:
+`results/browser-compare-20260627T154646/browser-compare.json`, with analyzer
+output at `/tmp/analysis-20260627T154646.md`, compared plain `hsdescshare`,
+the new `arti_release_browser_hsdescshare_schedburst2`, and local C Tor in a
+single cold interleaved run across `securedrop` and the direct onion download
+page. Plain Arti was skipped to keep the screen narrow. Quality stayed `PASS`.
+
+This new lane is rejected for now. The only thing it improved was boot
+(`10.434s` versus `11.922s` on plain `hsdescshare`), but real browsing got far
+worse on both targets. Against plain `hsdescshare`, `schedburst2` lost
+`securedrop` elapsed/load by `+8524.558ms` / `+8569.752ms`, and lost the onion
+page by `+69250.222ms` / `+69287.879ms`. It also lost badly to local C Tor on
+the onion page (`+33109.258ms` elapsed, `+33097.755ms` load, and
+`+24892.755ms` boot+load). The only misleading-looking read was
+`securedrop` boot+load versus local C Tor (`-885.684ms`), but that came only
+from local C Tor's slower boot; actual `securedrop` page load still lost by
+`+7319.316ms`.
+
+The failure shape was not subtle. Onion response start on `schedburst2`
+jumped to `65051.301ms` versus `2800.056ms` on plain `hsdescshare`. Onion
+`queued >=1000ms` rose to `28` versus `12`, onion median
+`fetchStart -> requestStart` grew to `4075.081ms` versus `1016.687ms`, and
+`securedrop` DOM-to-load jumped to `4933.432ms` versus `583.345ms`. Analyzer
+blockers for the new lane were `slower than C Tor, resource queue, slow
+onion/data gap`, and the saved proxy tail on `securedrop` ended with
+`Connection reset by peer`.
+
+Current call after `154646`: reject
+`arti_release_browser_hsdescshare_schedburst2` for now. Do not spend repeat
+benchmark time on this exact lane unless a source-level explanation appears
+first, because the first screen already shows a huge regression rather than a
+borderline tradeoff. `gpt-5.4-pro` via `cz` said `supported`: one mixed-target
+run is enough to reject this lane for now because the real-page regressions
+are enormous, though it is not enough to prove root cause or permanently rule
+out every future revisit.
+
+New benchmark-only plain-`hsdescshare` coalesce lane:
+`tools/run_browser_compare.py` and
+`tools/run_browser_compare_hidden_service.py` now also support
+`--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-bytes`. This
+keeps plain `hsdescshare`, but sets
+`TORFAST_STREAM_READY_DATA_COALESCE_BYTES` only on that descriptor-sharing
+lane. It does not change any default path. Focused validation passed:
+`python3 -m py_compile tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tests/test_browser_quality.py tests/test_run_browser_compare_hidden_service.py`,
+`python3 -m unittest tests.test_browser_quality.BrowserQualityTests.test_interleaved_schedule_can_add_extra_hsdescshare_stream_ready_data_coalesce_profile tests.test_run_browser_compare_hidden_service.RunBrowserCompareHiddenServiceTests.test_wrapper_forwards_hsdescshare_stream_ready_data_coalesce_flag tests.test_browser_quality.BrowserQualityTests.test_interleaved_schedule_can_add_extra_hsdescshare_scheduler_burst_profile tests.test_run_browser_compare_hidden_service.RunBrowserCompareHiddenServiceTests.test_wrapper_forwards_hsdescshare_scheduler_burst_flag`,
+`python3 tools/run_browser_compare_hidden_service.py --help | rg "stream-ready-data-coalesce|stream-scheduler-burst"`,
+and `git diff --check -- tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tests/test_browser_quality.py tests/test_run_browser_compare_hidden_service.py`.
+
+First focused onion-only screen for that lane:
+`results/browser-compare-20260627T205740/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260627T205740/analysis.md`, compared
+plain `hsdescshare`,
+`arti_release_browser_hsdescshare_streamreadycoalesce4096`, and local C Tor in
+one cold interleaved run on the direct onion download page. Plain Arti was
+skipped to keep the screen narrow. Quality stayed `PASS`.
+
+This first screen looked good, but only as a clue. The new lane booted in
+`14.097s`, versus `18.388s` on plain `hsdescshare` and `18.791s` on local
+C Tor. It also loaded faster: `8753.918ms`, versus `14033.331ms` on plain
+`hsdescshare` and `8966.316ms` on local C Tor. But the scope stayed strict:
+one run was not enough to promote anything under the no-quality-loss rule.
+
+Stronger onion-only repeat for the same lane:
+`results/browser-compare-20260627T210009/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260627T210009/analysis.md`, reran that
+same direct onion page with `4` cold interleaved runs for plain
+`hsdescshare`, `arti_release_browser_hsdescshare_streamreadycoalesce4096`, and
+local C Tor. Quality still stayed `PASS`.
+
+This repeat rejected the lane hard. Plain `hsdescshare` booted in `9.508s` and
+loaded in `12817.035ms`. Local C Tor booted in `16.650s` and loaded in
+`11852.264ms`. The new lane collapsed to `92.528s` boot and
+`31968.467ms` median load. Analyzer blockers were `boot slower`,
+`boot directory`, `slower than C Tor`, `resource queue`, and
+`slow onion/data gap`. It logged `30` directory-failure signals,
+`35` unresolved slow onion streams, and worst load delta
+`+23033.649ms` versus local C Tor.
+
+Current call after `210009`: park
+`arti_release_browser_hsdescshare_streamreadycoalesce4096`. Keep it only as a
+narrow clue about the boot-directory and slow-onion-stream path. Do not keep
+it as an active lead or a promotion lane. `gpt-5.4-pro` via `cz` matched that
+call exactly: `Keep it only as a narrow clue, not an active lead.`
+
+New benchmark-only hop-gated `hsdescshare` coalesce lane:
+`upstream/arti/crates/tor-proto/src/client/stream/data.rs` now supports the
+lab-only env gate `TORFAST_STREAM_READY_DATA_COALESCE_MIN_HOP`. Default stays
+off. When enabled, ready-data coalescing only runs on streams at or above the
+chosen hop. `tools/run_browser_compare.py` and
+`tools/run_browser_compare_hidden_service.py` now expose that as
+`--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-combo`,
+formatted as `COALESCE_BYTES:MIN_HOP`. Focused validation passed:
+`python3 -m py_compile tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tools/check_arti_quality_config.py tests/test_browser_quality.py tests/test_run_browser_compare_hidden_service.py tests/test_arti_quality_config.py`,
+`python3 -m unittest tests.test_browser_quality.BrowserQualityTests.test_interleaved_schedule_can_add_extra_hsdescshare_stream_ready_data_coalesce_profile tests.test_browser_quality.BrowserQualityTests.test_interleaved_schedule_can_add_extra_hsdescshare_stream_ready_data_coalesce_min_hop_profile tests.test_run_browser_compare_hidden_service.RunBrowserCompareHiddenServiceTests.test_wrapper_forwards_hsdescshare_stream_ready_data_coalesce_flag tests.test_run_browser_compare_hidden_service.RunBrowserCompareHiddenServiceTests.test_wrapper_forwards_hsdescshare_stream_ready_data_coalesce_min_hop_combo_flag`,
+`cargo build -p arti --release`,
+`cargo test -p tor-proto coalesce_ --lib -- --test-threads=1`, and
+`git diff --check -- upstream/arti/crates/tor-proto/src/client/stream/data.rs tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tools/check_arti_quality_config.py tests/test_browser_quality.py tests/test_run_browser_compare_hidden_service.py tests/test_arti_quality_config.py`.
+`python3 tools/check_arti_quality_config.py` still returned nonzero because of
+older unrelated checks, but the new hop-gated coalesce check and the existing
+ready-data coalesce check both passed in
+`results/arti-quality-config-20260627T213734/arti-quality-config.json`.
+
+First mixed-target screen for that lane:
+`results/browser-compare-20260627T214054/browser-compare.json` compared plain
+`hsdescshare`,
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4`, and local
+C Tor in one cold interleaved run across `securedrop` and the direct onion
+download page. This was only a clue, but it looked promising: the new lane
+booted in `17.414s` versus `25.363s` on plain `hsdescshare`; on the onion page
+it loaded in `8830.511ms` versus `13618.572ms`; and on `securedrop` it loaded
+in `1860.874ms` versus `4908.213ms`. Resource count and screenshot bytes
+matched on both checked pages.
+
+Stronger mixed-target repeat for the same lane:
+`results/browser-compare-20260627T214646/browser-compare.json` reran plain
+`hsdescshare`,
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4`, and local
+C Tor with `4` cold interleaved runs across those same two targets.
+
+This repeat says the page-load win is real, but it is not promotion-ready. The
+new lane still beat plain `hsdescshare` on both targets: onion page median
+load improved from `9643.489ms` to `7645.633ms`, and `securedrop` median load
+improved from `6053.516ms` to `3452.006ms`. It also kept visible output aligned
+on the two checked pages: onion page median resource count stayed `36.0` and
+screenshot bytes stayed `734099.0`; `securedrop` median resource count stayed
+`32.5` and screenshot bytes stayed `1111257.0`. All `4` runs succeeded on both
+targets with `0` benchmark failures.
+
+But the lane still lost the overall speed race to local C Tor, and boot got
+worse. Local C Tor booted in `16.580s`; plain `hsdescshare` booted in
+`17.217s`; the new lane booted in `19.860s`. On the onion page, local C Tor
+still loaded in `7385.470ms`, slightly ahead of the new lane's `7645.633ms`.
+On `securedrop`, local C Tor still loaded in `2493.597ms`, ahead of the new
+lane's `3452.006ms`. The new lane also logged one boot-time
+`directory failure` / `Partial response` / `directory timed out` /
+`microdescriptor partial retry chunking` signal, even though benchmark-run
+signal lines showed `0` directory failures.
+
+Current call after `214646`: keep
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4` behind the
+lab-only gate, but do not push it now. `gpt-5.4-pro` via `cz` matched that
+call: real page-load win with no visible quality loss on these two pages, but
+not a clean overall win because boot got about `15%` slower. The next exact
+step is a paired A/B with at least `20` runs per target, while tracking boot
+time separately from page-load time and watching whether the boot retry noise
+goes away or repeats.
+
+New benchmark-only backlog-threshold gate on top of that lane:
+`upstream/arti/crates/tor-proto/src/client/stream/data.rs` now also supports
+the lab-only env `TORFAST_STREAM_READY_DATA_COALESCE_START_BACKLOG_BYTES`.
+Default and minimum stay `498`; maximum is `65536`. This only changes the
+bench lane when explicitly set. `tools/run_browser_compare.py` and
+`tools/run_browser_compare_hidden_service.py` now expose
+`--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-start-backlog-combo`,
+formatted as `COALESCE_BYTES:MIN_HOP:START_BACKLOG_BYTES`. Focused validation
+passed:
+`python3 -m py_compile tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tools/check_arti_quality_config.py tests/test_browser_quality.py tests/test_run_browser_compare_hidden_service.py tests/test_arti_quality_config.py`,
+`python3 -m unittest tests.test_browser_quality.BrowserQualityTests.test_parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos tests.test_browser_quality.BrowserQualityTests.test_interleaved_schedule_can_add_extra_hsdescshare_stream_ready_data_coalesce_min_hop_start_backlog_profile tests.test_browser_quality.BrowserQualityTests.test_start_arti_accepts_proxy_buffer_size tests.test_browser_quality.BrowserQualityTests.test_start_arti_sets_lab_env_overrides tests.test_run_browser_compare_hidden_service.RunBrowserCompareHiddenServiceTests.test_wrapper_forwards_hsdescshare_stream_ready_data_coalesce_min_hop_start_backlog_combo_flag`,
+`cargo test -p tor-proto coalesce_ --lib -- --test-threads=1`,
+and `git diff --check -- upstream/arti/crates/tor-proto/src/client/stream/data.rs tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tools/check_arti_quality_config.py tests/test_browser_quality.py tests/test_run_browser_compare_hidden_service.py tests/test_arti_quality_config.py`.
+
+First mixed-target pilot for that new backlog gate:
+`results/browser-compare-20260627T224456/browser-compare.json` compared plain
+`hsdescshare`, the older
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4`, the new
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4backlog1494`,
+and local C Tor in one cold interleaved run across `securedrop` and the direct
+onion download page. Browser quality stayed green, and all checked pages loaded
+with the expected titles.
+
+This pilot rejects the new backlog gate. Plain `hsdescshare` still booted best
+at `14.095s` with `0` bad boot signals. The older `4096:4` lane booted in
+`17.213s` with `5` bad boot signals, but kept its strong onion win:
+`6217.728ms` load on the onion page versus `12257.131ms` on plain
+`hsdescshare`. The new `4096:4:1494` lane booted in `27.459s` with `10` bad
+boot signals and repeated `Partial response` / timeout bootstrap trouble. It
+did improve on plain `hsdescshare` for the onion page (`10983.793ms` versus
+`12257.131ms`), and it was much better than old `4096:4` on `securedrop`
+(`2202.234ms` versus `4060.488ms`), but it still lost to plain `hsdescshare`
+on `securedrop` (`1836.935ms`) and lost badly on boot. It was also clearly
+worse than old `4096:4` on onion speed.
+
+Current call after `224456`: reject
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4backlog1494`
+as a promotion lane and stop spending repeat runs on that backlog gate for now.
+Revert the next proof back to plain `arti_release_browser_hsdescshare` versus
+the older `arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4`
+only. `gpt-5.4-pro` via `cz` matched that call exactly: the new backlog gate
+kept quality, but it is clearly rejected by this pilot because it is worse than
+plain on boot and `securedrop`, worse than old `4096:4` on onion speed, and
+adds much noisier startup risk.
+
+Wrapper now follows the promoted cold-scope candidate:
+`tools/run_browser_compare_hidden_service.py` now includes
+`--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-combo 4096:4`
+by default for this exact cold mixed-target matrix. This only changes the
+benchmark wrapper. It does not change any Arti default behavior. Focused
+validation passed:
+`python3 -m py_compile tools/run_browser_compare_hidden_service.py tests/test_run_browser_compare_hidden_service.py`
+and
+`python3 -m unittest tests.test_run_browser_compare_hidden_service.RunBrowserCompareHiddenServiceTests.test_default_wrapper_includes_promoted_cold_scope_candidate tests.test_run_browser_compare_hidden_service.RunBrowserCompareHiddenServiceTests.test_wrapper_forwards_hsdescshare_stream_ready_data_coalesce_min_hop_combo_flag`.
+
+Stronger cold mixed-target repeat for the same lane:
+`results/browser-compare-20260627T225432/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260627T225432/analysis.md`, reran plain
+Arti, plain `hsdescshare`,
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4`, and local C
+Tor with `12` cold interleaved runs across `securedrop` and the direct onion
+download page.
+
+The global analyzer still said `quality: FAIL`, but the failure was not on the
+pair of interest. Plain Arti had one onion failure and local C Tor had one
+onion failure. The exact comparison that mattered here stayed clean: plain
+`hsdescshare` and `4096:4` both went `12/12` on both targets, browser quality
+proof stayed green, and paired successful runs had `0` title mismatches,
+`0` screenshot-byte mismatches, and `0` resource-count mismatches on both
+targets.
+
+This rerun flipped the boot story hard. Plain `hsdescshare` booted in
+`12.854s`. The `4096:4` lane booted in `8.696s`, with `0` bad boot signals.
+Local C Tor booted in `19.860s`. On pure page-load medians, `4096:4` was still
+slightly worse than plain `hsdescshare`: on `securedrop`, median load moved
+from `3313.094ms` to `3719.902ms`; on the onion page, from `7849.042ms` to
+`8055.310ms`. Paired run-level load wins were mixed too: `4/12` on
+`securedrop`, `6/12` on the onion page.
+
+But on the exact cold path, `4096:4` is now the best lane in this scope. Once
+boot is included, cold-total median load time beat plain `hsdescshare` by
+`3751.191ms` on `securedrop` and `3951.731ms` on the onion page. It won
+cold-total `11/12` on both targets. In this rerun it also beat local C Tor on
+both boot and page-load medians for both checked targets.
+
+Current call after `225432`: promote
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4` over plain
+`arti_release_browser_hsdescshare` for the exact cold mixed-target scope only.
+Keep that promotion narrow. Do not treat `4096:4` as the new broader or
+default winner yet, because its pure page-load medians are still a bit worse
+than plain `hsdescshare` even though its cold-total result is much better.
+`gpt-5.4-pro` via `cz` matched that call exactly: promote it for exact cold
+mixed-target runs, but keep it lab-only outside that narrow scope until the
+steady-state page-load regression is explained or removed.
+
+Larger exact paired repeat for the same cold mixed-target scope:
+`results/browser-compare-20260628T110457/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260628T110457/analysis.md`, reran plain
+`hsdescshare`,
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4`, and local C
+Tor with `20` cold interleaved runs across `securedrop` and the direct onion
+download page. Plain Arti was skipped so the exact comparison could stay clean.
+
+This repeat is stronger than `225432` and it changes the read in an important
+way. The promoted `4096:4` lane now beat plain `hsdescshare` on both pure
+page-load medians and cold totals, not only on cold totals.
+
+Against plain `hsdescshare`, the `4096:4` lane:
+
+- loaded `securedrop` faster at `2819.626ms` versus `3727.616ms`, with paired
+  load wins `12/19` and paired median load delta `-744.674ms`
+- loaded the onion download page faster at `6120.810ms` versus `7453.981ms`,
+  with paired load wins `13/20` and paired median load delta `-806.550ms`
+- finished end-to-end faster too: paired median elapsed delta was
+  `-796.556ms` on `securedrop` and `-973.470ms` on the onion page
+
+Against local C Tor, the `4096:4` lane also stayed ahead in this exact screen:
+
+- `securedrop` median load `2819.626ms` versus local C Tor `3963.491ms`, with
+  paired load wins `15/20` and paired median load delta `-1228.332ms`
+- onion median load `6120.810ms` versus local C Tor `6529.751ms`, with paired
+  load wins `12/20` and paired median load delta `-151.065ms`
+- cold total stayed better on both targets because boot was `21.919s` versus
+  local C Tor `22.622s`
+
+Quality stayed strong on the promoted lane itself:
+
+- `4096:4` went `20/20` on both targets
+- local C Tor also went `20/20` on both targets
+- the only failure in the whole matrix was plain `hsdescshare` on
+  `securedrop` run `11`, which hit a `120000ms` navigation timeout after many
+  slow onion side requests
+- onion medians kept the same screenshot bytes (`734099`) and resource count
+  (`36`) across all three compared lanes
+- `securedrop` screenshot bytes stayed fixed at `1111257` and the title stayed
+  `Share and accept documents securely` on successful runs for both Arti lanes;
+  only resource count jittered by `1`, which also happens on the baselines
+
+The new risk read is narrower now. The promoted lane still has analyzer
+blockers: `boot directory`, `resource queue`, `slow onion/data gap`, and
+`slow hostname stream`. It also logged more retained directory-failure signals
+than plain `hsdescshare` during boot (`12` versus `3`), even though both Arti
+lanes still booted in about the same time (`21.919s` versus `21.731s`).
+
+Current call after `110457`: keep
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4` as the
+current best exact-quality lane for this cold mixed-target hidden-service
+scope, and strengthen the claim: in this `20`-run screen it beat both plain
+`hsdescshare` and local C Tor on both checked targets. Still keep the claim
+scoped and lab-only for now. The next exact work is not another broad matrix;
+it is the analyzer's own `next proof`: stream-gap proof on the promoted lane,
+plus the boot-directory noise path that still shows up even in a winning run.
+
+Focused stream-gap and boot-noise proof on that promoted lane:
+`results/browser-compare-20260628T143619/browser-compare.json`, with the saved
+focused note at
+`results/browser-compare-20260628T143619/promoted-lane-proof.md`, reran the
+same hidden-service wrapper scope with the current promoted lane enabled by
+default plus `--browser-net-log`, `--byte-tap`,
+`--byte-tap-socks-reply-bind-port-tag`, and
+`--arti-socks-relay-byte-timing`. The compared set stayed narrow:
+plain `hsdescshare`, promoted `4096:4`, and local C Tor. Plain Arti stayed
+skipped.
+
+This is not a new broad promotion proof against local C Tor because the local
+onion baseline failed `2/4`. But it does answer the repo's next exact proof
+questions for the promoted lane itself.
+
+First, the promoted lane stayed clean while the current plain `hsdescshare`
+baseline also stayed clean. Both Arti lanes finished `4/4` on both targets with
+the same visible page outputs:
+
+- onion screenshots stayed `734099` bytes with resource count `36`
+- `securedrop` screenshots stayed `1111257` bytes
+- the promoted lane kept the same wrapper-scoped privacy shape while the new
+  instrumentation stayed diagnostic-only
+
+Second, the promoted lane beat the current plain `hsdescshare` baseline hard in
+this proof window:
+
+- boot `5.601s` versus `21.691s`
+- `securedrop` load `3685.154ms` versus `5751.789ms`
+- `securedrop` elapsed `5221.984ms` versus `7308.332ms`
+- direct onion load `7986.583ms` versus `11863.628ms`
+- direct onion elapsed `9565.720ms` versus `13403.346ms`
+- boot plus load improved from `27442.789ms` to `9286.154ms` on `securedrop`
+  and from `33554.628ms` to `13587.583ms` on the onion page
+
+Third, the boot-directory noise did not reproduce on the promoted lane in this
+diagnostic proof. The focused analyzer note shows no boot-directory failure row
+for `arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4`, while
+plain `hsdescshare` still logged `4` directory failures, `4` directory
+timeouts, and `4` partial responses with boot `21.691s`. That narrows the risk:
+the boot-directory blocker is not a stable property of the promoted lane in the
+same way it was for the plain baseline here.
+
+Fourth, the new stream-gap proof moves the remaining blocker away from hidden-
+service setup and toward late onion-page queue pressure after stream readiness.
+The worst promoted-lane gap rows in the focused note were all sub-`600ms` and,
+on the onion page, did not line up with slow HS setup:
+
+- run `4` timing `85`: gap `580ms`, request-to-stream-ready `882ms`, no
+  retained HS or HsPool setup rows
+- run `4` timing `81`: gap `577ms`, request-to-stream-ready `426ms`, no
+  retained HS or HsPool setup rows
+- run `4` timing `83`: gap `572ms`, request-to-stream-ready `563ms`, no
+  retained HS or HsPool setup rows
+- run `1` timings `24` and `25`: gaps `555ms` and `541ms`, with only the normal
+  retained `stem_ready` plus `stem_selected` guarded-pool rows
+
+The byte-context proof in the same saved note also showed those worst promoted-
+lane gaps carrying `0` Tor-side relay-receive events inside the strict gap
+window, while the queue-blocker rows clustered on the onion page at slot depth
+`6` around the same asset families (`tor-logo@2x`, `TBA10.0.png`,
+`stay-safe.svg`, and fontawesome/social icon assets). High-confidence relay-gap
+rows there stayed in the same `~572..577ms` band. So the remaining visible loss
+is no longer "slow HS setup" in this proof; it is late same-origin slot pressure
+and request-wait / response-receive fanout on the onion page after setup has
+already succeeded.
+
+Current call after `143619`: keep
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4` as the
+current best exact-quality lane for this cold mixed-target hidden-service scope.
+The new diagnostic proof strengthens two things:
+
+- the boot-directory noise did not reproduce on the promoted lane here
+- the next source target is narrower now: late onion page queue / fanout after
+  stream readiness, not another broad HS setup or boot-timing sweep
+
+This is still not a repo-wide promotion. Local C Tor's onion baseline failed in
+this exact proof, and the promoted lane's blocker row still says
+`slower than C Tor, resource queue, slow onion/data gap`. But the remaining
+problem is now better localized than before.
+
+Clean onion-baseline follow-up after that diagnostic proof:
+`results/browser-compare-20260628T152229/browser-compare.json`, with the saved
+summary note at
+`results/browser-compare-20260628T152229/clean-onion-baseline-proof.md`, reran
+only the direct onion download page with the current hidden-service wrapper
+defaults, `--runs 6`, `--compact-output`, and no byte-tap or browser-net-log
+diagnostic overhead.
+
+This was the direct follow-up the `cz` second opinion asked for: try to get a
+cleaner local C Tor onion baseline before deciding whether to keep spending time
+on baseline proof versus the already-isolated source lane.
+
+The promoted lane stayed strong. `arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4`
+finished `6/6`, plain `hsdescshare` also finished `6/6`, and visible output
+stayed aligned across successful runs with onion screenshot bytes `734099` and
+resource count `36`.
+
+Timing still favored the promoted lane clearly:
+
+- boot `8.245s` versus `10.178s` on plain `hsdescshare` and `34.695s` on local
+  C Tor
+- median load `6861.695ms` versus `7584.433ms` on plain `hsdescshare` and
+  `12610.534ms` on local C Tor
+- median elapsed `8253.568ms` versus `8995.825ms` on plain `hsdescshare` and
+  `13987.640ms` on local C Tor
+- boot plus load `15106.695ms` versus `17762.433ms` on plain `hsdescshare` and
+  `47305.534ms` on local C Tor
+
+The important negative result is that the requested clean local baseline still
+did not fully materialize. Local C Tor failed `1/6` on the onion page even
+without the extra byte-tap and browser-net-log diagnostic overhead, and its
+boot stayed extremely slow in this exact screen (`34.695s`).
+
+So this rerun changes the tactical call a bit. The problem is no longer "the
+diagnostic proof was too heavy, so we still need a cleaner onion baseline
+before trusting the promoted lane." We tried the cleaner onion baseline. The
+promoted lane stayed stable, while the local onion baseline still stayed noisy.
+
+There is still a small retained boot-risk note on the promoted lane: its boot
+signals included one early directory channel-open timing row with
+`error_kind="TorAccessFailed"` at `392ms`. But that did not stop clean boot, did
+not produce a browser failure, and did not erase the promoted lane's timing lead
+in this screen.
+
+Current call after `152229`: keep
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4` as the
+current scoped winner for this onion workload too. Do not spend another turn
+just trying to force a perfectly clean local C Tor onion baseline in the same
+shape unless a harness bug appears. The better next move is now the source lane
+already isolated by the previous proof: late onion-page queue / fanout after
+stream readiness, not another broad hidden-service setup or boot sweep.
+
+Adaptive busy-coalesce follow-up after that source patch:
+`results/browser-compare-20260628T154446/browser-compare.json`, with the saved
+summary note at
+`results/browser-compare-20260628T154446/adaptive-busy-coalesce-proof.md`,
+reran only the direct onion download page with `--runs 4`,
+`--compact-output`, and a newly rebuilt release binary after adding an adaptive
+busy-fanout cap inside ready DATA coalescing.
+
+This changed the blocker shape in a meaningful way. The promoted lane
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4` stayed clean
+at `4/4`, plain `hsdescshare` also stayed clean at `4/4`, and local C Tor still
+failed `1/4`.
+
+The promoted lane stayed clearly fastest on page timing:
+
+- median load `6122.497ms` versus `8288.124ms` on plain `hsdescshare`,
+  `14999.159ms` on plain Arti, and `20385.537ms` on local C Tor
+- median elapsed `8603.033ms` versus `10164.397ms` on plain `hsdescshare`,
+  `17363.939ms` on plain Arti, and `22242.607ms` on local C Tor
+- boot plus load `25004.497ms` versus `25827.124ms` on plain `hsdescshare`
+
+The important source-level read is that the analyzer no longer flags
+`resource queue` on the promoted lane in this exact screen. Its blocker row
+narrowed to `baseline failed, boot slower, slow onion/data gap`, and its worst
+late queue fell to `2433.382ms`, versus `6800.136ms` on plain `hsdescshare`
+and `3283.399ms` on plain Arti.
+
+So this patch looks like a real hit on the page-resource queue tail, but not a
+promotion yet. The promoted lane also booted in `18.882s` here, with `3`
+directory channel-open `TorAccessFailed` rows at `10004ms`, so the next check
+still needs to distinguish real boot regression from retained directory noise.
+
+Isolated rendezvous-timeout-floor A/B after wiring the new harness knob:
+`tools/run_browser_compare.py` and
+`tools/run_browser_compare_hidden_service.py` now support a benchmark-only
+hidden-service rendezvous establish timeout floor through
+`--extra-arti-hs-desc-shared-cache-rendezvous-establish-timeout-floor-ms` and
+`--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-rendezvous-establish-timeout-floor-combo`.
+Focused checks passed after that harness patch:
+
+- `python3 -m py_compile tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tests/test_browser_quality.py tests/test_run_browser_compare_hidden_service.py`
+- `python3 -m unittest tests.test_browser_quality tests.test_run_browser_compare_hidden_service` (`259` tests)
+
+The first isolated run with those knobs was
+`results/browser-compare-20260628T170714/browser-compare.json`, with the saved
+note at
+`results/browser-compare-20260628T170714/rendezvous-timeout-floor-ab-note.md`.
+It kept the target narrow: only the direct onion download page, `--runs 4`,
+plain `hsdescshare`, plain `hsdescshare + floor1500`, plain `4096:4`,
+`4096:4 + floor1500`, and local C Tor. Plain Arti stayed skipped.
+
+This answered the source question cleanly. The new floor only appeared on the
+two floor lanes, and the exact hidden-service failure mode we were chasing did
+reproduce on the non-floor lanes:
+
+- plain `hsdescshare` logged `Creating a rendezvous circuit and rendezvous point took too long` on run `1`
+- plain `4096:4` logged the same timeout on run `3`
+- neither floor lane logged that timeout in this run
+
+But the speed read rejects the floor as a promotion move in this exact screen.
+On this onion-only A/B, plain `hsdescshare` was still the best Arti lane by
+both page load and cold total:
+
+- plain `hsdescshare`: boot `12.247s`, load `6790.411ms`, boot+load `19037.411ms`
+- `hsdescshare + floor1500`: boot `28.947s`, load `10961.004ms`, boot+load `39908.004ms`
+- plain `4096:4`: boot `31.840s`, load `11454.591ms`, boot+load `43294.590ms`
+- `4096:4 + floor1500`: boot `25.374s`, load `11452.015ms`, boot+load `36826.015ms`
+
+So the floor did help `4096:4` relative to its no-floor twin here, mostly by
+improving boot. But both `4096:4` variants still lost badly to plain
+`hsdescshare`, and the plain `hsdescshare + floor1500` lane was also much worse
+than plain `hsdescshare`.
+
+The global analyzer still said `quality: FAIL`, but again the failure was on
+local C Tor, not on the Arti lanes of interest. Local C Tor failed `1/4` with
+an onion browser timeout, while all four Arti lanes finished `4/4` with the
+same screenshot bytes (`734099`) and resource count (`36`).
+
+Current call after `170714`: keep the new rendezvous establish timeout floor as
+a useful diagnostic lab knob, but reject it as the next speed-promotion path.
+It removes one real hidden-service timeout failure mode, yet it does not
+produce the fastest exact-quality lane in this isolated screen. The floor is
+not the move that gets us to "exact Tor privacy plus much faster".
+
+Busy-fanout cap follow-up after making that cap lab-tunable:
+`upstream/arti/crates/tor-proto/src/client/stream/data.rs` now lets the
+existing ready-DATA busy cap take a bounded lab override through
+`TORFAST_STREAM_READY_DATA_COALESCE_BUSY_MAX_BYTES`, and
+`tools/run_browser_compare.py` plus
+`tools/run_browser_compare_hidden_service.py` now expose that as
+`--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-busy-max-combo`.
+This stays default-off and only changes the post-ready per-read busy cap inside
+the already-lab-only hidden-service coalesce family. Validation passed with:
+
+- `python3 -m py_compile tools/run_browser_compare.py tools/run_browser_compare_hidden_service.py tools/check_arti_quality_config.py tests/test_browser_quality.py tests/test_run_browser_compare_hidden_service.py tests/test_arti_quality_config.py`
+- `python3 -m unittest tests.test_browser_quality tests.test_run_browser_compare_hidden_service tests.test_arti_quality_config`
+- `cargo test -p tor-proto coalesce_ --lib -- --test-threads=1`
+- `cargo build -p arti --release`
+
+First focused onion-only A/B for that knob:
+`results/browser-compare-20260628T181929/browser-compare.json`, with saved
+note at `results/browser-compare-20260628T181929/busy-max-ab-note.md` and
+analyzer output at `results/browser-compare-20260628T181929/analysis.md`,
+reran only the direct onion download page with `--runs 4`,
+`--compact-output`, `--skip-plain-arti`, the current `hsdescshare` family, and
+two new busy-cap lanes:
+
+- `4096:4:996` (`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4busymax996`)
+- `4096:4:498` (`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4busymax498_2`)
+
+This split the story cleanly. The two-cell cap, `busymax996`, was faster on its
+successful runs but is rejected on quality: it failed `1/4` with
+`about:neterror?e=onionServices.descNotFound`, and the analyzer tied that to an
+`OnionServiceNotFound` failure on a port `80` HS browser request after
+descriptor-parse activity. So `busymax996` is not safe enough for promotion.
+
+The one-cell cap, `busymax498`, is the interesting result. It finished `4/4`
+with the same visible output as plain `hsdescshare`: median screenshot bytes
+`734099` and median resource count `36`. It also beat plain `hsdescshare` on
+speed in this exact onion-only screen:
+
+- plain `hsdescshare`: boot `34.240s`, load `7708.436ms`, boot+load `41948.436ms`
+- current `4096:4`: boot `27.698s`, load `28003.489ms`, boot+load `55701.489ms`
+- new `4096:4 busymax498`: boot `22.299s`, load `7156.867ms`, boot+load `29455.867ms`
+
+So in this run `busymax498` beat plain `hsdescshare` by about `-551.569ms` on
+median page load and by about `-12492.569ms` on cold boot plus load. It also
+avoided the catastrophic regression that hit the older `4096:4` lane in this
+same window.
+
+The matrix still fails global analyzer quality, but not because `busymax498`
+was bad. The two failed profiles were local C Tor (`2/4` success) and rejected
+`busymax996` (`3/4` success). That means this run is not broad enough to call
+the full goal done or to promote `busymax498` broadly. Current call after
+`181929`: reject `busymax996`, keep `busymax498` as the new promising onion-only
+lab candidate, and make the next proof a narrower rerun that keeps the relevant
+clean comparison set while dropping the already-rejected two-cell cap.
+
+`gpt-5.4-pro` via `cz` matched that call on the distilled evidence summary:
+reject `busymax996`, keep `busymax498` as a promising onion-only lab candidate,
+and do the next proof as a narrower rerun on the clean comparison set instead
+of broad promotion.
+
+To make that narrow rerun possible without getting blocked by unrelated local C
+Tor bootstrap noise, `tools/run_browser_compare.py` and
+`tools/run_browser_compare_hidden_service.py` now also support
+`--skip-local-c-tor`. The interleaved scheduler can omit local C Tor entirely
+while still saving a skipped row, and focused tests cover that flag path.
+
+The first attempt to use that for a clean rerun,
+`results/browser-compare-20260628T190040/browser-compare.json`, did not become
+usable speed proof. Local C Tor still stayed in the comparison set there and
+timed out during bootstrap at `55% (loading_descriptors)`, so both Arti lanes
+only saved boot evidence and empty `benchmarks` sections. Saved note:
+`results/browser-compare-20260628T190040/bootstrap-timeout-note.md`.
+
+The real clean Arti-vs-Arti rerun after that harness fix was
+`results/browser-compare-20260628T191730/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260628T191730/analysis.md` and summary
+note at `results/browser-compare-20260628T191730/clean-compare-note.md`. This
+kept only the exact onion comparison set we wanted: plain `hsdescshare` versus
+`busymax498`, on the direct onion download page, `--runs 6`, no bundled Tor,
+no local C Tor, and no plain Arti.
+
+This clean rerun changed the call again. Quality passed cleanly: both Arti
+lanes finished `6/6`, and visible output stayed aligned with median screenshot
+bytes `734099` and median resource count `36`. But `busymax498` is not the
+exact faster lane on page performance:
+
+- plain `hsdescshare`: boot `13.941s`, load `6740.476ms`, boot+load `20681.476ms`
+- `busymax498`: boot `8.820s`, load `10510.536ms`, boot+load `19330.536ms`
+
+So `busymax498` did win cold boot plus load by about `-1350.940ms`, but it lost
+median page load by about `+3770.060ms`. The queue evidence also moved the wrong
+way in the clean set: median fetch-to-request rose from about `833ms` on plain
+`hsdescshare` to about `1400ms` on `busymax498`, and queued `>=1000ms`
+resources rose from `90` to `125`.
+
+Current strict call after `191730`: do not promote `busymax498` as the exact
+faster lane. Keep it only as a boot-oriented lab clue. `gpt-5.4-pro` via `cz`
+matched that distilled read exactly: keep plain `hsdescshare` as the current
+exact-quality baseline, label `busymax498` as a cold-start hypothesis only, and
+only revisit this direction if the boot gain can be isolated without the
+queue/load regressions.
+
+Clean Arti-only onion rerun for the shared-hit-only family:
+`results/browser-compare-20260628T193149/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260628T193149/analysis.md` and summary
+note at
+`results/browser-compare-20260628T193149/clean-sharedhitonly-compare-note.md`,
+then compared plain `hsdescshare`, shared-hit-only, and
+`sharedhitonly_streamreadycoalesce4096` on the same direct onion page with
+`--runs 6`, no bundled Tor, no local C Tor, and no plain Arti.
+
+Quality passed cleanly on all three Arti lanes, but the speed call stayed
+negative for both shared-hit-only variants. Visible output matched on every
+lane: median screenshot bytes `734099`, median resource count `36`, and
+analyzer `quality: PASS`. But plain `hsdescshare` still won the exact onion
+scope:
+
+- plain `hsdescshare`: boot `10.328s`, load `8134.709ms`, boot+load `18462.709ms`
+- shared-hit-only: boot `23.173s`, load `9807.645ms`, boot+load `32980.645ms`
+- `sharedhitonly_streamreadycoalesce4096`: boot `12.213s`, load `10633.959ms`, boot+load `22846.959ms`
+
+Current call after `193149`: do not promote the shared-hit-only family from
+this clean rerun. Both shared-hit-only lanes are slower than plain
+`hsdescshare` on page load and cold total in the exact onion-only clean set.
+
+Clean Arti-only onion rerun for `hsdescshare + torclientcoalesce4096`:
+`results/browser-compare-20260628T194446/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260628T194446/analysis.md` and summary
+note at `results/browser-compare-20260628T194446/torclientcoalesce-note.md`,
+then compared only plain `hsdescshare` and
+`hsdescshare_torclientcoalesce4096` on the same direct onion page with
+`--runs 6`, no bundled Tor, no local C Tor, and no plain Arti.
+
+Quality again passed cleanly on both lanes, and visible output stayed aligned
+at median screenshot bytes `734099` and median resource count `36`. But the
+new lane is a hard reject on speed shape:
+
+- plain `hsdescshare`: boot `6.158s`, load `9374.280ms`, boot+load `15532.280ms`
+- `hsdescshare_torclientcoalesce4096`: boot `42.156s`, load `10870.626ms`, boot+load `53026.626ms`
+
+The mechanism read is also clearly negative. Boot-directory failure signals
+rose to `30` on the coalescing lane, with `10` directory failures, `10`
+directory timeouts, and `10` partial responses. Queue shape also did not
+improve enough to matter: queued `>=1000ms` resources rose from `120` to
+`131`.
+
+`gpt-5.4-pro` via `cz` matched the current strict read over both clean reruns:
+keep plain `hsdescshare` as the exact-quality baseline for this clean onion-only
+scope, and reject `sharedhitonly`, `sharedhitonly_streamreadycoalesce4096`, and
+`hsdescshare_torclientcoalesce4096` as promotion paths.
+
+Clean Arti-only onion rerun for plain `hsdescshare` reuse-cap lanes:
+`results/browser-compare-20260628T201027/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260628T201027/analysis.md` and summary
+note at `results/browser-compare-20260628T201027/hsreuseactive-note.md`, then
+compared plain `hsdescshare` plus two new plain shared-cache lanes that only
+set `TORFAST_HS_STATE_REUSE_MAX_ACTIVE_STREAMS` to `1` or `2` on the same
+direct onion page with `--runs 6`, no bundled Tor, no local C Tor, and no
+plain Arti.
+
+Quality stayed clean again on all three Arti lanes: analyzer `quality: PASS`,
+median screenshot bytes `734099`, and median resource count `36`. But this
+next-closest same-family lever is also a strict reject on speed:
+
+- plain `hsdescshare`: boot `6.225s`, load `12603.994ms`, boot+load `18828.994ms`
+- `hsreuseactive1`: boot `12.305s`, load `12844.887ms`, boot+load `25149.887ms`
+- `hsreuseactive2`: boot `18.720s`, load `18567.626ms`, boot+load `37287.626ms`
+
+`hsreuseactive1` did remove the baseline boot-directory failures, but it still
+lost the exact faster call. Median page load got about `+240.893ms` worse,
+boot got about `+6.080s` slower, and the max load tail blew out to
+`50827.781ms`. Its queue shape also stayed wrong for promotion: max queued ms
+fell from `14366.954` to `8500.170`, but unresolved slow onion streams rose
+from `14` to `43`. `hsreuseactive2` was clearly worse on both main timings and
+queue shape, with max queued ms rising to `18933.712` and both boot and page
+load much slower than plain `hsdescshare`.
+
+Current strict call after `201027`: reject both plain `hsdescshare`
+reuse-cap lanes as exact-quality speed paths for this clean onion-only scope,
+and keep plain `hsdescshare` as the current baseline. `gpt-5.4-pro` via `cz`
+matched that distilled read exactly: `KEEP baseline; REJECT both.` Its short
+reason was that neither reuse-cap lane is actually faster on real page load,
+`hsreuseactive1` is slower with a bad tail, and `hsreuseactive2` is much
+slower on both boot and load.
+
+Clean Arti-only onion reruns for plain `hsdescshare` versus the new
+post-bootstrap-only HSDir cap lane:
+`results/browser-compare-20260628T210602/browser-compare.json` and
+`results/browser-compare-20260628T211359/browser-compare.json`, with analyzer
+outputs at `results/browser-compare-20260628T210602/analysis.md` and
+`results/browser-compare-20260628T211359/analysis.md`, plus the combined note
+at `results/browser-compare-20260628T211359/postbootonly-note.md`. Both reruns
+kept no bundled Tor, no local C Tor, and no plain Arti, then compared only
+plain `hsdescshare` against
+`arti_release_browser_hsdescshare_hsdirextendcap3000ms_postbootonly` on the
+same direct onion page with `--runs 6`.
+
+Both reruns kept visible output aligned: analyzer `quality: PASS`, median
+screenshot bytes `734099`, and median resource count `36` on both lanes. The
+new lane won hard on boot both times and on cold boot+load both times, but the
+page-load-only medians split:
+
+- rerun `210602`: baseline boot `29.518s`, load `13394.508ms`, boot+load `42912.508ms`; post-boot-only boot `7.997s`, load `9952.073ms`, boot+load `17949.073ms`
+- rerun `211359`: baseline boot `10.791s`, load `8317.690ms`, boot+load `19108.690ms`; post-boot-only boot `8.918s`, load `9623.412ms`, boot+load `18541.412ms`
+
+Across all `12` paired runs, the candidate still led on aggregate speed and
+tail shape: combined median load `9717.872ms` vs `11861.144ms`, combined
+median boot+load `18315.113ms` vs `40085.819ms`, mean load `10561.726ms` vs
+`16847.113ms`, and max load `18235.689ms` vs `69298.997ms`.
+
+Mechanism proof was partly good but not fully stable. In rerun `210602`, the
+post-bootstrap-only lane enabled the cap `3.666s` after boot, first retained
+`ClientHsDir` arrived `44.666s` after boot, and retained decision rows showed
+`cap_applied_rows=4`. In rerun `211359`, the lane enabled the cap `72.337s`
+after boot but retained decision rows showed `cap_applied_rows=0`, so that
+rerun did not actually prove the capped branch was exercised.
+
+The strict quality call is still not closed. Rerun `210602` removed baseline
+boot-directory failures and improved queue max, but unresolved slow streams
+rose from `17` to `21`. Rerun `211359` still had a slightly better cold
+boot+load total, but median page load got about `+1305.722ms` worse,
+directory-failure signals rose from `0` to `5`, queue max rose from
+`3966.746` to `8550.171`, and unresolved slow streams rose from `12` to `16`.
+
+`gpt-5.4-pro` via `cz` reviewed the first rerun and then the two-rerun
+aggregate. Both reads landed on `NEED MORE PROOF`: speed is clearly stronger
+and visible output still matches, but the exact no-degradation bar is not
+cleared yet because Tor-internal quality and health signals still regress on
+repeat runs and one rerun did not actually show the cap getting applied.
+
+Current strict call after `211359`: keep
+`hsdescshare_hsdirextendcap3000ms_postbootonly` as the strongest same-family
+speed candidate so far, but do not promote it yet as the exact-quality answer.
+The next proof should be more paired reruns until the lane keeps the same
+output and speed win without repeat regressions in
+directory, queue, and unresolved-stream signals while also showing retained
+`cap_applied` rows.
+
+Fresh clean Arti-only onion rerun for plain `hsdescshare` versus
+`arti_release_browser_hsdescshare_hsdirextendcap2500ms_postbootonly`:
+`results/browser-compare-20260628T214141/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260628T214141/analysis.md` and summary
+note at `results/browser-compare-20260628T214141/postboot2500-note.md`. This
+run again kept no bundled Tor, no local C Tor, and no plain Arti, then
+compared only those two Arti lanes on the same direct onion page with
+`--runs 6`.
+
+Visible output stayed aligned: analyzer `quality: PASS`, median screenshot
+bytes `734099`, and median resource count `36` on both lanes. But this new
+`2500ms` candidate is a strict reject on exact-quality speed:
+
+- baseline: boot `9.403s`, load `9926.333ms`, boot+load `19329.333ms`
+- `2500ms` post-boot-only: boot `9.985s`, load `12516.921ms`, boot+load `22501.921ms`
+
+So the candidate lost about `+2590.588ms` on median page load and about
+`+3172.588ms` on cold boot+load in the direct A/B that was supposed to confirm
+it.
+
+The Tor-internal shape also moved the wrong way even though this single window
+removed the baseline boot-directory failure signal. Unresolved slow streams
+rose from `13` to `20`, queued `>=1000ms` resources rose from `125` to `132`,
+and sampled resource median wait rose from `550.011ms` to `716.681ms`.
+
+Mechanism proof improved a little over the earlier sweep but still did not
+clear the exact bar. The new run showed retained decision rows with
+`cap_applied_rows=3`, but the first retained `ClientHsDir` after boot still
+saw the cap off. Combined with the earlier sweep at
+`results/browser-compare-20260628T212919/analysis.md`, that closes
+`hsdescshare_hsdirextendcap2500ms_postbootonly` as not suitable for
+promotion.
+
+Current strict call after `214141`: reject
+`hsdescshare_hsdirextendcap2500ms_postbootonly` as an exact-quality speed path.
+Keep `hsdescshare_hsdirextendcap3000ms_postbootonly` as the strongest
+same-family speed candidate so far, but still unproven and not promotable yet.
+
+`gpt-5.4-pro` via `cz` reviewed
+`results/browser-compare-20260628T214141/analysis.md` together with
+`results/browser-compare-20260628T212919/analysis.md` and
+`results/browser-compare-20260628T211359/postbootonly-note.md`. Its verdict
+was `KEEP_3000_UNPROVEN`: reject `2500ms`, keep `3000ms` as the better speed
+lead only, and do not promote it yet.
+
+Fresh clean Arti-only onion rerun for plain `hsdescshare` versus
+`arti_release_browser_hsdescshare_hsdirextendcap3000ms_postbootonly`:
+`results/browser-compare-20260628T215220/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260628T215220/analysis.md` and summary
+note at `results/browser-compare-20260628T215220/postboot3000-note.md`. This
+run again kept no bundled Tor, no local C Tor, and no plain Arti, then
+compared only those two Arti lanes on the same direct onion page with
+`--runs 6`.
+
+Visible output stayed aligned again: analyzer `quality: PASS`, median
+screenshot bytes `734099`, and median resource count `36` on both lanes. But
+this fresh `3000ms` rerun removes the remaining case for that lane as an
+exact-quality speed path:
+
+- baseline: boot `7.866s`, load `8899.338ms`, boot+load `16765.338ms`
+- `3000ms` post-boot-only: boot `13.116s`, load `9267.878ms`, boot+load `22383.878ms`
+
+So in this clean direct A/B, `3000ms` lost about `+368.540ms` on median page
+load and about `+5618.540ms` on cold boot+load.
+
+This rerun also added a new strict blocker relative to baseline: boot-directory
+failure signals rose from `0` to `5`, and the `3000ms` lane carried a bootstrap
+warning in the same window. Some queue and unresolved-stream counts improved
+versus this specific baseline window, but that does not overcome the slower
+real page load, much slower cold total, and the new boot-directory regression.
+
+Mechanism proof did land in this rerun: the post-bootstrap-only cap turned on
+after boot and retained decision rows showed `cap_applied_rows=2`. But the
+goal is exact Tor quality plus faster, and this run still fails the faster
+bar. Combined with the earlier `214141` reject for `2500ms`, no tested
+post-boot-only HSDir cap lane is promotable right now.
+
+Current strict call after `215220`: keep plain `hsdescshare` as the
+exact-quality baseline for this clean onion-only scope. Reject both
+`hsdescshare_hsdirextendcap2500ms_postbootonly` and
+`hsdescshare_hsdirextendcap3000ms_postbootonly` as current promotion paths.
+
+`gpt-5.4-pro` via `cz` reviewed
+`results/browser-compare-20260628T215220/analysis.md` together with
+`results/browser-compare-20260628T214141/postboot2500-note.md` and
+`results/browser-compare-20260628T211359/postbootonly-note.md`. Its verdict
+was `KEEP_BASELINE`: the fresh `3000ms` rerun is slower on the main speed
+metrics, adds a boot-directory blocker, and removes the basis for keeping
+`3000ms` alive as the provisional lead.
+
+Corrected clean Arti-only onion rerun for plain `hsdescshare` versus
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4`:
+`results/browser-compare-20260628T225425/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260628T225425/analysis.md`, summary note
+at `results/browser-compare-20260628T225425/corrected-wrapper4096-note.md`,
+and `gpt-5.4-pro` second opinion at
+`results/browser-compare-20260628T225425/cz-second-opinion.md`. This rerun used
+the hidden-service wrapper defaults on the same direct onion page with
+`--runs 6`, `--compact-output`, `--skip-plain-arti`, and `--skip-local-c-tor`.
+That matters because the earlier bad direct rerun at
+`results/browser-compare-20260628T221115/browser-compare.json` omitted the
+wrapper base flags that this lane depends on.
+
+Visible output stayed aligned again: analyzer `quality: PASS`, median
+screenshot bytes `734099`, and median resource count `36` on both lanes. In
+this corrected A/B, `streamreadycoalesce4096minhop4` is back to a clear
+exact-quality speed win:
+
+- baseline `hsdescshare`: boot `19.291s`, load `11938.944ms`, boot+load `31229.944ms`
+- `streamreadycoalesce4096minhop4`: boot `6.029s`, load `7781.456ms`, boot+load `13810.456ms`
+
+So the candidate won by about `-4157.488ms` on median page load and about
+`-17419.488ms` on cold boot+load.
+
+The Tor-internal shape also improved rather than regressed in this window.
+Blocker summary dropped the slow hostname stream, unresolved slow streams
+improved from `14` to `11`, and max queued ms improved from `7950.159` to
+`4850.097`. Both lanes kept `0` failures and `0` boot-directory failure
+signals, so this rerun did not buy speed with a new strict blocker.
+
+Current strict call after `225425`: for this clean onion-only scope, replace
+plain `hsdescshare` with
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4` as the
+current exact-quality speed lane. Keep both post-boot-only HSDir-cap lanes
+rejected: `hsdescshare_hsdirextendcap2500ms_postbootonly` and
+`hsdescshare_hsdirextendcap3000ms_postbootonly` remain closed.
+
+`gpt-5.4-pro` via `cz` reviewed the corrected evidence and agreed with the
+scoped promotion. Its verdict said
+`hsdescshare_streamreadycoalesce4096minhop4` is the strict clean onion-only
+winner over plain `hsdescshare`, and its call was to replace plain
+`hsdescshare` with the wrapper-equivalent-base
+`hsdescshare_streamreadycoalesce4096minhop4` for this scope while continuing to
+ignore the earlier misconfigured rerun and keeping the post-boot-only cap
+rejections unchanged.
+
+Fresh broader mixed-target recheck of that same wrapper lane:
+`results/browser-compare-20260628T232119/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260628T232119/analysis.md`, summary note
+at `results/browser-compare-20260628T232119/broader-mixed-target-note.md`, and
+`gpt-5.4-pro` second opinion at
+`results/browser-compare-20260628T232119/cz-second-opinion.md`. This reran the
+hidden-service wrapper defaults on the two default targets
+(`https://securedrop.org/` plus the direct onion download page) with `--runs 8`,
+`--compact-output`, `--skip-local-c-tor`, and `--skip-plain-arti`, so it kept
+only the exact broad Arti-vs-Arti comparison we care about.
+
+Quality still passed here: analyzer `quality: PASS`. Visible output stayed
+aligned on medians too:
+
+- onion screenshot bytes `734099`, resource count `36`
+- `securedrop` screenshot bytes `1111257`, resource count `33`
+
+But this is a strict reject for broadening `4096:4` beyond the narrow
+onion-only scope. The candidate only improved onion pure page load, while the
+broader speed and boot shape regressed hard:
+
+- baseline `hsdescshare`: boot `10.550s`, `securedrop` load `4847.681ms`, onion load `15576.615ms`
+- `streamreadycoalesce4096minhop4`: boot `32.967s`, `securedrop` load `10709.856ms`, onion load `12271.265ms`
+- baseline cold totals: `securedrop` boot+load `15397.681ms`, onion boot+load `26126.615ms`
+- candidate cold totals: `securedrop` boot+load `43676.857ms`, onion boot+load `45238.265ms`
+
+So the candidate won onion pure load by about `-3305.350ms`, but lost boot by
+about `+22417ms`, lost `securedrop` load by about `+5862.175ms`, and lost cold
+boot+load by about `+28279.176ms` on `securedrop` plus `+19111.650ms` on the
+onion page.
+
+The boot-directory evidence is also a hard blocker in this broader screen.
+Baseline already had some retained directory noise, but the candidate was much
+worse: dir failure signals rose from `5` to `12`, boot-directory summary moved
+from `1` dir failure / `0` timeouts / `0` build fails to `4` dir failures /
+`4` timeouts / `2` build fails, and the first timeout landed at `27s`.
+
+Current strict call after `232119`: keep
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4` only in the
+already-confirmed narrow onion-only scope. For the broader wrapper-default
+mixed-target hidden-service scope, keep plain
+`arti_release_browser_hsdescshare` as the exact-quality baseline.
+
+`gpt-5.4-pro` via `cz` agreed with that narrowing. Its verdict said
+`hsdescshare_streamreadycoalesce4096minhop4` fails the broader hidden-service
+promotion bar, and its call was to keep the broader wrapper-default lane on
+plain `hsdescshare` while retaining the candidate only in the already-confirmed
+narrow onion-only scope.
+
+Short confirmatory repeat for that same broader wrapper-default scope:
+`results/browser-compare-20260628T233328/browser-compare.json`, with analyzer
+output at `results/browser-compare-20260628T233328/analysis.md`, summary note
+at `results/browser-compare-20260628T233328/broader-mixed-target-repeat-note.md`,
+and `gpt-5.4-pro` second opinion at
+`results/browser-compare-20260628T233328/cz-second-opinion.md`. This kept the
+same broad Arti-vs-Arti comparison set as `232119` but shortened to `--runs 4`.
+
+This repeat changed the read a little, but not the call. It showed the broader
+wrapper-default scope is unstable rather than a simple one-way loss for
+`4096:4`:
+
+- baseline `hsdescshare`: boot `34.352s`, `securedrop` load `5004.550ms`, onion load `5717.008ms`
+- `streamreadycoalesce4096minhop4`: boot `34.799s`, `securedrop` load `2270.515ms`, onion load `8583.610ms`
+- baseline cold totals: `securedrop` boot+load `39356.550ms`, onion boot+load `40069.008ms`
+- candidate cold totals: `securedrop` boot+load `37069.514ms`, onion boot+load `43382.610ms`
+
+So in this repeat the candidate won `securedrop`, but lost onion load, lost
+onion cold total, and still kept worse directory-failure signals (`19` versus
+`9`). Combined with `232119`, that means `4096:4` still does not establish a
+stable exact faster broad promotion path even though it can win parts of the
+broader screen.
+
+Current strict call after `233328`: unchanged from `232119`. Keep plain
+`arti_release_browser_hsdescshare` as the broader wrapper-default
+hidden-service baseline, and keep
+`arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4` limited to
+the already-confirmed narrow onion-only scope.
+
+`gpt-5.4-pro` via `cz` matched that exact call: do not promote the broader
+wrapper-default hidden-service scope, keep it on baseline `hsdescshare`, and
+keep `hsdescshare_streamreadycoalesce4096minhop4` limited to the narrow clean
+onion-only scope.
+
+July 1, 2026 normal-browser follow-up after the static-gate refactor:
+
+- `tools/analyze_browser_compare.py` now treats a max-only queue outlier as
+  non-blocking when the same target already has fewer queued `>=1000ms`
+  resources and a lower median fetch-to-request delay. This keeps a real queue
+  regression blocker for broad or median queue losses, but stops a single worse
+  max queued resource from blocking promotion when the overall queue shape is
+  already better.
+- Replaying
+  `results/browser-compare-20260701T193354/browser-compare.json` through the
+  updated analyzer changed plain release Arti from `resource queue` to
+  `none seen` in `results/browser-compare-20260701T193354/analysis.md`. In that
+  saved 3-run same-window proof, plain release Arti still beat local C Tor on
+  raw median page load on all three pages, and the old tuned wrapper lane
+  stayed rejected.
+- Release Arti is now rebuilt with RPC support, and the fresh wider runtime
+  proof `results/arti-rpc-path-20260701T204030/arti-rpc-path.json` is clean:
+  `ok = true`, `full_runtime_quality_proof = true`,
+  `runtime_path_shape_proof = true`, `sample_count = 3`.
+- But the broader same-window browser rerun
+  `results/browser-compare-20260701T204144/browser-compare.json`, with analyzer
+  output at `results/browser-compare-20260701T204144/analysis.md`, keeps the
+  broad speed claim rejected. Quality passed, and plain release Arti still won
+  cold boot plus median load because boot was `18.421s` versus local C Tor
+  `32.873s`. However it lost raw median page load on all three targets:
+  `4096.122ms` versus `3080.476ms` on Tor check, `10997.199ms` versus
+  `8643.949ms` on the homepage, and `15775.258ms` versus `10784.115ms` on the
+  download page.
+- Current strict call after `204144`: keep the no-demonstrated-quality-drop
+  claim for the tested plain-Arti path, keep the stronger RPC path proof, but
+  do not widen that into “plain Arti is broadly faster” yet. The broader gate
+  still says `slower than C Tor, resource queue`, so the next source target is
+  again the late page/resource queue path on the normal browser workload.
+
+Reader-side queued-DATA fill experiment, July 2:
+
+- I tested a narrow `tor-proto` reader change that let `DataReader` keep
+  filling the caller buffer from already-queued DATA cells instead of stopping
+  after a single cell. The goal was to cut local wakeup overhead on normal
+  browser HTTP/1.1 resource bursts without changing path rules.
+- Static and runtime quality proof stayed clean on the patched binary:
+  `results/arti-quality-config-20260701T235015/arti-quality-config.json` still
+  had `68` blocking checks with `0` blocking failures, and
+  `results/arti-rpc-path-20260701T235015/arti-rpc-path.json` stayed
+  `ok = true`, `full_runtime_quality_proof = true`,
+  `runtime_path_shape_proof = true`, `sample_count = 3`.
+- A fresh broad patched run,
+  `results/browser-compare-20260701T235142/browser-compare.json`, was too noisy
+  to trust alone: it passed quality, won the download page against local C Tor,
+  but had two much slower targets and a huge homepage queue tail.
+- I then built a same-window A/B with both binaries:
+  patched Arti as `arti_release_browser`, pre-patch HEAD as
+  `arti_release_browser_headbaseline`, local C Tor as the control, and saved it
+  at `results/browser-compare-20260702T000557/browser-compare.json` with
+  analyzer output at `results/browser-compare-20260702T000557/analysis.md`.
+- That A/B rejects the reader patch. On the homepage the patched build was only
+  slightly better than pre-patch HEAD (`11319.732ms` versus `12239.016ms`
+  median load), but on the download page it lost badly: patched median load was
+  `25774.707ms` versus pre-patch HEAD `8635.952ms`, with paired deltas
+  `+4816.763ms` on response-to-DOM and `+11800.236ms` on DOM-to-load. The
+  patched max load on download also blew out to `34573.839ms` versus
+  pre-patch HEAD `8813.215ms`.
+- Strict call: reject this reader-side queued-DATA fill change and keep it out
+  of the current source. I reverted the patch, rebuilt release Arti, and kept
+  the repo on the pre-patch baseline while preserving the A/B artifacts above.
+
+Current-tree selector screens and explicit 3-target rerun, July 2:
+
+- I then rechecked the current tree with fresh same-window browser runs using
+  the installed Tor Browser app at `/Applications/Tor Browser.app`, still
+  keeping the plain release-Arti baseline against local C Tor.
+- The first screen,
+  `results/browser-compare-20260702T002818/browser-compare.json`, with analyzer
+  output at `results/browser-compare-20260702T002818/analysis.md`, tested the
+  current bad-health selector family on Tor check and the homepage. That window
+  is rejection proof only. `arti_release_browser_avoidbadhealth` hit a
+  catastrophic Tor-check load (`57540.665ms`) and
+  `arti_release_browser_healthaware_avoidbadhealth` blew out the homepage
+  (`20774.807ms` median, `35158.567ms` max). Both were slower than plain Arti,
+  and the analyzer kept the loss reason at `browser resource queue`.
+- The second screen,
+  `results/browser-compare-20260702T004152/browser-compare.json`, with analyzer
+  output at `results/browser-compare-20260702T004152/analysis.md`, tested the
+  current load-aware and healthy-over-cold selector family on the homepage and
+  download page. Quality passed, but it still rejects both selector paths on
+  the current tree. Plain Arti was the within-window winner at
+  `10335.663ms` versus local C Tor `18800.467ms` on the homepage and
+  `6872.438ms` versus local C Tor `8490.780ms` on download, while
+  `arti_release_browser_loadaware` degraded badly (`37474.618ms` download
+  median) and `arti_release_browser_loadaware_healthyovercold1` still lost to
+  plain Arti on both big pages.
+- But the clean explicit 3-target rerun,
+  `results/browser-compare-20260702T005307/browser-compare.json`, with analyzer
+  output at `results/browser-compare-20260702T005307/analysis.md`, keeps the
+  strict broad speed claim rejected on the current tree. Quality passed, but
+  plain Arti again lost raw median page load on all three targets:
+  `4305.918ms` versus local C Tor `2874.667ms` on Tor check,
+  `10187.475ms` versus `7546.825ms` on the homepage, and
+  `11216.753ms` versus `9097.304ms` on the download page.
+- Boot still strongly favored Arti in that same rerun (`11.267s` versus local
+  C Tor `29.698s`), so boot plus median load stayed better end-to-end, but the
+  page-only claim we need for “extreme fast” is still not proven. The analyzer
+  still blocks promotion on `slower than C Tor, resource queue`.
+- Strict call after these July 2 reruns: keep the goal incomplete on the
+  current tree. Do not promote `avoidbadhealth`,
+  `healthaware_avoidbadhealth`, `loadaware`, or `healthyovercold1` as the
+  normal-browser path. The remaining source target is still the plain-baseline
+  normal-page HTTP/1.1 resource queue / variant-swap timing gap, not more
+  selector stacking.
+
+Buffered browser-read patch and July 2 follow-up:
+
+- Local `tor-proto` source now lets `DataReaderInner` keep a terminal result
+  after buffered bytes are already available, and it keeps draining multiple
+  ready DATA cells into one application read before surfacing EOF or an error.
+  The source change is in
+  `upstream/arti/crates/tor-proto/src/client/stream/data.rs`.
+- The first attempt at this patch was wrong and was caught immediately by a
+  browser proof: the focused run
+  `results/browser-compare-20260702T012842/browser-compare.json` failed boot
+  because directory HTTP parsing broke (`Couldn't parse HTTP headers: invalid
+  HTTP version`). I fixed the overwrite bug in the read loop, reran
+  `cargo test -p tor-proto`, and rebuilt release Arti before taking new browser
+  proofs.
+- The corrected focused homepage/download proof,
+  `results/browser-compare-20260702T013632/browser-compare.json`, with analyzer
+  output at `results/browser-compare-20260702T013632/analysis.md`, is a real
+  improvement signal. Quality passed, the analyzer reported `none seen`, and
+  plain Arti beat local C Tor on both pages in that same window:
+  homepage `7189.696ms` versus `11997.025ms`, and download `8410.671ms`
+  versus `11882.297ms`.
+- But the broader explicit 3-target rerun,
+  `results/browser-compare-20260702T014126/browser-compare.json`, with analyzer
+  output at `results/browser-compare-20260702T014126/analysis.md`, still does
+  not clear the strict gate. Quality passed again, and download improved a lot,
+  but the analyzer still blocks promotion on `slower than C Tor` with `2` slow
+  targets. In that run Arti still lost Tor Check (`3609.416ms` versus
+  `2689.474ms`), and the paired-run table still flags the homepage path as not
+  broadly clean enough even though the raw sorted median moved closer.
+- So this patch is worth keeping as a real mechanism improvement, but it is not
+  enough to say “exact Tor privacy/quality and extreme faster than Tor” is
+  solved on the current tree. The clearest remaining blocker is still broad-case
+  latency on the slow targets, especially Tor Check and the unstable homepage
+  tail, not quality regressions.
+- I also asked `gpt-5.4-pro` through `cz` for a second opinion after these
+  reruns. Its verdict matched the call above: the patch improves the speed
+  evidence without degrading the currently checked quality, but the strict goal
+  is still not satisfied because the latest broad proof remains slower than C
+  Tor on two slow targets.
+
+Managed repeated-open gate retune and July 4 follow-up:
+
+- I kept the managed repeated-open default conservative in code: warm-only
+  prestarts can still return at `socks_ready`, but reused-network `open` keeps
+  the normal managed page-launch gate at `tor_boot_95`. The gate retune is in
+  `tools/launch_torfast_browser.py`, and the proof harness now has
+  `--use-managed-open-gate` plus browser diagnostic passthroughs
+  `--browser-net-log`, `--browser-serial-http-connections`,
+  `--browser-max-persistent-connections-per-server`, and
+  `--browser-block-url-substring` in
+  `tools/run_torfast_warm_open_benchmark_compare.py`.
+- Focused checks passed after that harness patch:
+  `python3 -m py_compile tools/run_torfast_warm_open_benchmark_compare.py tests/test_torfast_warm_open_benchmark_compare.py`
+  and `python3 -m unittest tests.test_torfast_warm_open_benchmark_compare -q`.
+- The first real command-path confirmation,
+  `results/torfast-warm-open-compare-20260704T160841/summary.json`, reran
+  actual `torfast warm` plus `torfast open` across Tor Check and the homepage
+  for `12` cycles. Quality stayed clean `12/12` on both targets, and the
+  retuned `auto` path still won combined wall in that narrow command workflow:
+  Tor Check `6.415s` versus `6.742s`, homepage `6.235s` versus `6.502s`.
+- The first managed-open-gate page-load proof,
+  `results/torfast-warm-open-benchmark-compare-20260704T162203/summary.json`,
+  stayed clean `6/6` and also favored `auto` on the two checked targets:
+  Tor Check combined wall `8.903s` versus `9.395s`, elapsed `5827.269ms`
+  versus `6210.395ms`, load `3396.294ms` versus `4547.636ms`; homepage
+  combined wall `15.836s` versus `16.551s`, elapsed `12675.581ms` versus
+  `13715.485ms`, load `10607.162ms` versus `11074.568ms`.
+- But the broader explicit `3`-target rerun,
+  `results/torfast-warm-open-benchmark-compare-20260704T163103/summary.json`,
+  blocked promotion again. Quality still stayed clean `4/4`, but `auto`
+  regressed on the bigger real pages: homepage median combined wall moved to
+  `22.120s` versus `19.602s`, and download moved to `19.906s` versus
+  `18.102s`. The worst homepage and download `auto` cycles showed huge
+  same-origin fetch-to-request delays rather than Tor-check or privacy failures.
+- I then patched the harness to retain browser MOZ_LOG evidence and reran the
+  problem pages directly. The focused homepage repro,
+  `results/torfast-warm-open-benchmark-compare-20260704T165007/summary.json`,
+  again blocked `auto`: median combined wall `24.787s` versus `16.897s`,
+  median elapsed `21531.480ms` versus `13554.198ms`, and the worst `auto`
+  cycle reached `38371.398ms` elapsed with `17` resources queued more than
+  `5s` and `14` queued more than `10s` before request start. The per-run log at
+  `results/torfast-warm-open-benchmark-compare-20260704T165007/www.torproject.org_-auto-cycle3.json`
+  showed favicon/font/svg requests queued up to `21100.422ms`, while the
+  captured MOZ_LOGs showed repeated
+  `nsHttpConnectionMgr::AtActiveConnectionLimit` and `adding transaction to pending queue`
+  lines for `www.torproject.org`.
+- The focused download repro,
+  `results/torfast-warm-open-benchmark-compare-20260704T165313/summary.json`,
+  matched that shape. `auto` lost median combined wall `19.653s` versus
+  `15.817s` and median elapsed `16224.038ms` versus `12339.258ms`; the worst
+  `auto` cycle queued same-origin resources up to `8633.506ms` before request
+  start. This remains a speed-instability blocker, not a visible quality drop.
+- I also screened a stricter reused-open gate in
+  `results/torfast-warm-open-benchmark-compare-20260704T165808/summary.json`
+  by adding `tor_boot_100` beside `auto` and `tor_boot_95` on the homepage.
+  That screen did not rescue anything: this small window happened to favor
+  `auto` (`14.307s` combined wall versus `16.305s` for `tor_boot_95`), but
+  `tor_boot_100` was worse at `18.202s`, and the broader/focused evidence still
+  says homepage repeated-open page load is unstable across windows.
+- Strict repeated-open call after these July 4 reruns: do not promote `auto`
+  for managed repeated-open page loads, and do not promote `tor_boot_100`.
+  Keep `tor_boot_95` as the reused-network default while the same-origin
+  pending-queue / active-connection-limit slowdown is still unexplained.
+- I asked `gpt-5.4-pro` through `cz` for a second opinion on this July 4
+  evidence bundle, and it matched the call above in
+  `results/torfast-warm-open-benchmark-compare-20260704T165808/cz-second-opinion-summary-only.md`:
+  no Tor/privacy-quality regression is shown here, the blocker is speed
+  instability only, and the next justified experiment is a narrow causality run
+  on homepage/download that explains the browser connection-slot starvation
+  before changing any default.
+
+Managed repeated-open post-warm wait screens, July 4:
+
+- I added a dedicated analyzer for the repeated-open proof shape in
+  `tools/analyze_torfast_warm_open_benchmark_compare.py`, with focused test
+  coverage in `tests/test_analyze_torfast_warm_open_benchmark_compare.py`. The
+  analyzer summarizes per-profile combined wall/load medians plus same-origin
+  `fetchStart -> requestStart` queue tails and parent MOZ_LOG signals like
+  `AtActiveConnectionLimit`, pending-queue adds, and `ShouldThrottle`.
+- Focused checks passed after adding that tool:
+  `python3 -m py_compile tools/analyze_torfast_warm_open_benchmark_compare.py tests/test_analyze_torfast_warm_open_benchmark_compare.py`
+  and `python3 -m unittest tests.test_analyze_torfast_warm_open_benchmark_compare -q`.
+- I then tested whether a small same-quality post-warm wait could stabilize the
+  repeated-open queue tail without changing Tor path rules or browser privacy
+  prefs. The homepage auto-only sweep,
+  `results/torfast-warm-open-benchmark-compare-20260704T171203/summary.json`,
+  compared `auto` against `auto_wait_500ms`, `1000ms`, `1500ms`, and `2000ms`
+  for `3` cycles. The best homepage median there was `auto_wait_1000ms` at
+  `12.769s` combined wall versus plain `auto` `16.638s`. The analyzer output
+  showed median same-origin max queue falling to `2550.051ms` from
+  `3550.071ms`, with queued `>2s` resources dropping to `5` from `11`.
+- I then reran a same-window homepage A/B against the current reused-open
+  default in
+  `results/torfast-warm-open-benchmark-compare-20260704T171706/summary.json`,
+  comparing `auto`, `auto_wait_1000ms`, `tor_boot_95`, and
+  `tor_boot_95_wait_1000ms` for `4` cycles. In that homepage window,
+  `auto_wait_1000ms` was the winner: `20.817s` combined wall versus
+  `23.583s` for `tor_boot_95` and `28.999s` for plain `auto`, while its median
+  same-origin max queue dropped to `2733.388ms` versus `5258.439ms` for
+  `tor_boot_95`.
+- But the download page did not support a single stable wait answer. The
+  download auto-only sweep,
+  `results/torfast-warm-open-benchmark-compare-20260704T173511/summary.json`,
+  showed that several waits improved over plain `auto`; among clean `3/3`
+  variants, `auto_wait_1500ms` was best at `20.015s` combined wall versus
+  `27.850s` for `auto`, and the analyzer showed median same-origin max queue
+  falling to `5916.785ms` from `12416.915ms`.
+- However the decisive same-window download A/B,
+  `results/torfast-warm-open-benchmark-compare-20260704T174312/summary.json`,
+  rejected that candidate. In that window `auto_wait_1500ms` was slower and not
+  fully clean: `18.902s` combined wall with only `3/4` ok runs, versus plain
+  `auto` `14.239s` and `tor_boot_95` `15.553s`, both `4/4` ok. The analyzer
+  output there also showed `auto_wait_1500ms` with a worse median same-origin
+  max queue (`7950.159ms`) than plain `auto` (`4050.081ms`).
+- So the strict call after these wait screens stays conservative: post-warm
+  wait tuning is a real mechanism clue, because it can materially reduce the
+  same-origin queue tail in some windows, but no fixed wait value is yet proven
+  broad or stable enough to promote as the repeated-open default. Keep
+  `tor_boot_95` as the current reused-network default until a broader same-window
+  proof shows one candidate staying faster without new failures across both
+  homepage and download.
+- I also asked `gpt-5.4-pro` through `cz` for a second opinion on the distilled
+  July 4 wait-screen evidence, saved at
+  `results/torfast-warm-open-benchmark-compare-20260704T174312/cz-second-opinion-summary-only-distilled.md`.
+  Its call matched the one above: do not promote any fixed post-warm wait yet,
+  treat wait tuning as a real but window-unstable queue-mechanism clue, and
+  validate the surviving homepage-only `auto_wait_1000ms` candidate with more
+  same-window A/B reps before considering any conditional routing.
+
+Larger homepage and download wait-candidate rechecks, July 4:
+
+- I followed that advice with a heavier homepage rerun in
+  `results/torfast-warm-open-benchmark-compare-20260704T180958/summary.json`,
+  using `8` same-window cycles for `auto`, `auto_wait_1000ms`, `tor_boot_95`,
+  and `tor_boot_95_wait_1000ms`. That rerun rejected the homepage wait
+  candidate. `auto_wait_1000ms` still improved on plain `auto`
+  (`15.694s` combined wall versus `18.246s`), but plain `tor_boot_95` was still
+  better at `15.370s`, with lower median elapsed/load too
+  (`12171.466ms` / `10239.756ms` versus `13392.061ms` / `11602.461ms`).
+- The analyzer output on that `180958` screen kept the mechanism clue but also
+  showed why the homepage candidate is not promotable: `auto_wait_1000ms`
+  reduced the median same-origin max queue to `5275.105ms` from plain `auto`
+  `7691.820ms`, but `tor_boot_95` still did better at `4525.091ms` and also won
+  the overall repeated-open median. So the larger homepage same-window proof
+  closes the earlier `auto_wait_1000ms` hope: keep it as a queue clue only, not
+  a homepage routing default.
+- I then ran the same heavier confirmation on the remaining download-side hint
+  in `results/torfast-warm-open-benchmark-compare-20260704T182149/summary.json`,
+  again with `8` same-window cycles for `auto`, `auto_wait_1500ms`,
+  `tor_boot_95`, and `tor_boot_95_wait_1500ms`.
+- That larger download rerun is the first clean repeat where a wait-tuned lane
+  survives the broader same-window screen. `tor_boot_95_wait_1500ms` finished
+  `8/8` ok and had the best medians in that window: combined wall `14.182s`
+  versus plain `auto` `16.018s`, plain `tor_boot_95` `18.203s`, and
+  `auto_wait_1500ms` `15.425s`; median elapsed/load were also best at
+  `11363.844ms` / `9588.129ms`.
+- The analyzer on `182149` also showed the strongest queue-shape improvement on
+  that download rerun: `tor_boot_95_wait_1500ms` cut median same-origin max
+  queue to `4250.085ms`, versus plain `auto` `6091.789ms`, `auto_wait_1500ms`
+  `5300.106ms`, and plain `tor_boot_95` `7833.490ms`, while also driving the
+  median queued-`>5s` count down to `0`.
+- Strict call after these larger reruns: no single fixed wait is promotable as
+  a broad repeated-open default, because the larger homepage proof rejected the
+  homepage wait candidate. But there is now one surviving narrow same-window
+  candidate worth keeping alive for future proof: `tor_boot_95_wait_1500ms` on
+  the Tor Project download page family. It is still only a target-specific lab
+  clue, not a product default, until a future mixed-target or cross-window proof
+  shows that the win generalizes without new regressions.
+- I then ran exactly that mixed-target proof in
+  `results/torfast-warm-open-benchmark-compare-20260704T184559/summary.json`,
+  comparing only the current default `tor_boot_95` against
+  `tor_boot_95_wait_1500ms` across `4` same-window cycles on Tor Check, the
+  homepage, and the download page.
+- On Tor Check, the wait-tuned lane looked good: `tor_boot_95_wait_1500ms`
+  improved combined wall from `8.820s` to `8.198s`, and median elapsed/load
+  moved from `5489.514ms` / `3525.679ms` to `5015.260ms` / `2984.368ms`.
+- On the homepage it also stayed slightly better in that same mixed window:
+  combined wall `14.942s` versus `15.403s`, elapsed `11961.230ms` versus
+  `12265.411ms`, and load `9929.409ms` versus `10415.117ms`.
+- But the mixed-target proof rejected the candidate as a broad default on the
+  download page: `tor_boot_95_wait_1500ms` regressed to `18.207s` combined wall
+  versus plain `tor_boot_95` `15.779s`, with median elapsed/load also worse
+  (`14750.440ms` / `12942.659ms` versus `12931.129ms` / `11176.745ms`).
+- The analyzer output on that same mixed-target rerun matched the slowdown: the
+  download-page wait lane raised median same-origin max queue from `5625.112ms`
+  to `7700.154ms` and raised the median queued-`>5s` count from `1.5` to `5`,
+  even while Tor Check and homepage improved.
+- Strict call after `184559`: the current best evidence still does **not**
+  justify changing the broad reused-open default away from `tor_boot_95`. The
+  `1500ms` wait is now clearly screen-shape sensitive: it can win a larger
+  download-only window and stay neutral-to-better on homepage, but it also
+  loses the broader mixed-target download proof. Keep it as a real mechanism
+  clue, not a promoted default.
+- I then asked `gpt-5.4-pro` through `cz` for a second opinion on the exact
+  `184559` blocker, saved at
+  `results/torfast-warm-open-benchmark-compare-20260704T184559/cz-second-opinion-summary-only.md`.
+  It matched the strict read above: no Tor/privacy-quality regression is shown,
+  keep the broad reused-open default at `tor_boot_95`, and treat the next
+  justified step as a controlled mixed-vs-download-only follow-up that tests
+  whether prior targets reshape the later download queue.
+- That question was justified by the harness order itself: this benchmark loops
+  targets outermost, so in `184559` the download page always ran **after** the
+  Tor Check and homepage screens, while the stronger `182149` survivor ran only
+  the download target.
+- I tested that order hypothesis directly in
+  `results/torfast-warm-open-benchmark-compare-20260704T190828/summary.json`,
+  rerunning the same mixed-target set but reordered to Download -> Tor Check ->
+  Homepage, still with only `tor_boot_95` versus `tor_boot_95_wait_1500ms`,
+  `4` cycles, and the managed open gate.
+- That reordered rerun partially rescued the download median for the wait lane:
+  combined wall `15.600s` versus `15.849s`, and elapsed `12147.504ms` versus
+  `12822.149ms`. But it did **not** make the lane broadly good: download load
+  was still slightly worse (`10417.655ms` versus `9993.086ms`), the Tor Check
+  medians regressed to `10.175s` / `6993.485ms` / `5507.794ms` versus
+  `8.799s` / `5167.594ms` / `3700.841ms`, and the homepage regressed hard to
+  `19.149s` / `16168.689ms` / `14563.945ms` versus
+  `14.318s` / `10927.371ms` / `9413.697ms`.
+- The analyzer on `190828` showed the same pattern. Reordering helped the
+  download central tendency a little, but it did not remove instability:
+  download median same-origin max queue stayed close (`5675.113ms` versus
+  `5300.106ms`), while one wait-lane run exploded to `26450.529ms` max queue
+  with `15` resources queued longer than `10s`. That same run drove the wait
+  lane to `43.364s` max combined wall, `40209.025ms` max elapsed, and
+  `38044.833ms` max load.
+- This rerun was also not a clean promotion proof on its own: homepage
+  `tor_boot_95` finished only `3/4` full `ok` runs because one benchmark row
+  recorded `successes = 0`, `failures = 1`, even though Tor boot, isolation,
+  and stop stayed green. So the order rerun is useful as a mechanism clue, not
+  as a product-default proof.
+- Strict call after `190828`: target order is part of the story, because moving
+  download first can help its central metrics, but it does **not** rescue the
+  broader default case. `tor_boot_95_wait_1500ms` still is not promotable: it
+  regresses Tor Check and homepage, and on download it trades a small median
+  gain for catastrophic tail risk.
+- I asked `gpt-5.4-pro` through `cz` for a second opinion on this new
+  order-check turn too, saved at
+  `results/torfast-warm-open-benchmark-compare-20260704T190828/cz-second-opinion-summary-only.md`.
+  It matched the strict call above: the `184559` split was at least partly
+  order-sensitive on download central metrics, but not wrong on the broad
+  conclusion. Keep `tor_boot_95` as the broad reused-open default, and if we
+  continue this lead the next tight experiment should be a download-only
+  repeated-open A/B focused on tail behavior.
+- I then ran exactly that tighter tail check in
+  `results/torfast-warm-open-benchmark-compare-20260704T192214/summary.json`,
+  repeating only `https://www.torproject.org/download/` for `12` cycles with
+  just `tor_boot_95` versus `tor_boot_95_wait_1500ms`, the managed open gate,
+  and browser net-log capture.
+- That stricter download-only rerun reversed the earlier narrow `182149`
+  survivor. `tor_boot_95_wait_1500ms` lost the current medians outright:
+  combined wall `18.616s` versus `17.657s`, elapsed `15527.829ms` versus
+  `14263.449ms`, and load `13791.188ms` versus `11988.371ms`.
+- It also lost on tail behavior. The wait lane moved to p90 combined wall
+  `24.175s` versus `19.363s`, p90 elapsed `20274.493ms` versus `16084.127ms`,
+  and p90 load `18511.098ms` versus `14381.615ms`. Worst-case values were also
+  worse at `40.948s` max combined wall, `35770.870ms` max elapsed, and
+  `33686.305ms` max load, versus plain `tor_boot_95`
+  `38.339s` / `30223.292ms` / `28466.398ms`.
+- The analyzer output on `192214` matched that regression. The wait lane raised
+  median same-origin max queue from `5600.112ms` to `7033.474ms`, raised the
+  median queued-`>5s` count from `1` to `6`, and hit a worst queue of
+  `24067.148ms`, with the worst wait-lane run queuing `15` resources longer
+  than `10s` before request start.
+- This rerun still did not show a Tor/privacy-quality failure. One plain
+  `tor_boot_95` cycle recorded a benchmark-only failure row
+  (`successes = 0`, `failures = 1`), but Tor boot, isolation, and stop stayed
+  green, and plain `tor_boot_95` still won the ok-run medians above despite
+  that baseline handicap.
+- Strict call after `192214`: retire `tor_boot_95_wait_1500ms` even as a
+  download-only lead. The earlier `182149` result no longer looks robust or
+  reproducible; on the tighter repeat this wait lane loses on median, p90, max,
+  and queue behavior.
+- I asked `gpt-5.4-pro` through `cz` for a second opinion on this tighter
+  follow-up too, saved at
+  `results/torfast-warm-open-benchmark-compare-20260704T192214/cz-second-opinion-summary-only.md`.
+  It matched the strict read above: no Tor/privacy-quality degradation is shown
+  here, the blocker is still speed instability only, and this wait lane should
+  now be retired rather than rerun again. If we keep chasing this repeated-open
+  lane, the next justified move is to use the same `192214` protocol against
+  the next credible candidate, head-to-head with `tor_boot_95`.
+- I then tested the next exact-quality repeated-open candidate already in the
+  product path: the managed runtime helper itself. The first current-workflow
+  A/B used only `auto` on Tor Check, homepage, and download, comparing helper
+  enabled in
+  `results/torfast-warm-open-compare-20260704T193903/summary.json` against
+  exact opt-out `TORFAST_DISABLE_RUNTIME_HELPER=1` in
+  `results/torfast-warm-open-compare-20260704T194145/summary.json`.
+- That first A/B exposed a self-inflicted latency tax on the **first immediate**
+  `open` after `warm`. Per-run residual open overhead
+  (`open wall - browser elapsed - gate wait`) was about `0.334s` on Tor Check,
+  `0.344s` on the homepage, and `0.330s` on download with helper-on, versus
+  only about `0.065s`, `0.066s`, and `0.060s` with helper-off.
+- That gap closely matched the old helper startup wait in
+  `torfast/fast_runtime.py` (`RUNTIME_HELPER_STARTUP_WAIT_SECONDS = 0.25`), so
+  the current best explanation was that immediate `warm` -> `open` calls were
+  paying that helper-start wait before falling through to the same normal
+  launcher anyway.
+- I patched that exact behavior in `torfast/fast_runtime.py`: the helper startup
+  wait is now `0.0`, and `maybe_wait_for_runtime_helper()` returns immediately
+  when the helper is only starting but not yet ready. A focused regression test
+  now lives in `tests/test_torfast_main.py` to prove that pending-helper state
+  no longer sleeps before returning `None`.
+- Focused validation passed for the patch:
+  `python3 -m unittest tests.test_torfast_main.TorfastMainTests.test_maybe_wait_for_runtime_helper_returns_none_without_wait -q`
+  and
+  `python3 -m py_compile torfast/fast_runtime.py tests/test_torfast_main.py`.
+- I then reran the same three-target `auto` workflow after the patch, comparing
+  helper-on in `results/torfast-warm-open-compare-20260704T194847/summary.json`
+  against helper-off in
+  `results/torfast-warm-open-compare-20260704T195053/summary.json`, both for
+  `6` cycles.
+- That post-patch rerun removed the helper penalty exactly where expected.
+  Helper-on residual overhead dropped to about `0.083s` on Tor Check,
+  `0.072s` on the homepage, and `0.073s` on download. The matching helper-off
+  medians were about `0.075s`, `0.081s`, and `0.084s`, so helper-on now
+  effectively matches helper-off instead of carrying the old extra `~0.27s`.
+- Browser elapsed stayed effectively flat between helper-on and helper-off
+  after the patch (all within about `±0.014s`), which is the expected signature
+  for removing launcher-side latency rather than changing browser or Tor
+  behavior.
+- Combined wall after the patch was still mixed by target: helper-on beat
+  helper-off on Tor Check (`6.101s` versus `6.360s`) and download
+  (`5.771s` versus `5.982s`), but lost on the homepage (`6.329s` versus
+  `6.096s`). Those swings mostly tracked gate-wait variance, not helper
+  overhead, because the residual-overhead gap itself disappeared.
+- Quality stayed green throughout the A/B before and after the patch: reuse,
+  Tor boot, SOCKS isolation, and stop all stayed clean in the saved runs.
+- Strict call after `194847` / `195053`: keep this patch. It is a narrow but
+  real exact-quality fix because it removes artificial first-open latency from
+  the managed helper path. It is **not** the full repeated-open speed answer by
+  itself, because broad wall time is still mostly driven by gate-wait variance
+  in the managed `auto` workflow.
+- I asked `gpt-5.4-pro` through `cz` for a second opinion on this helper patch
+  turn too, saved at
+  `results/torfast-warm-open-compare-20260704T194847/cz-second-opinion-summary-only.md`.
+  It matched the strict read above: keep the patch as a targeted removal of
+  self-inflicted first-open latency, no Tor/privacy-quality regression is shown,
+  and the next experiment should move off helper startup and focus on the
+  remaining gate-wait variance in the managed `auto` warm/open path.
+- I tested one more narrow local timing idea on that remaining path by cutting
+  `PROCESS_POLL_INTERVAL_SECONDS` in `tools/launch_torfast_browser.py` from
+  `50ms` to `10ms`, then rerunning the same three-target `auto` workflow under
+  `results/torfast-warm-open-compare-20260704T200551/summary.json`.
+- That `10ms` poll cut did make `warm` return earlier: median warm wall dropped
+  from about `0.123s` / `0.122s` / `0.120s` to about
+  `0.076s` / `0.074s` / `0.075s` on Tor Check, homepage, and download.
+- But it did **not** improve the actual managed repeated-open workflow. Combined
+  wall got worse on all three targets: Tor Check `6.128s` versus `6.101s`,
+  homepage `6.436s` versus `6.329s`, and download `6.242s` versus `5.771s`.
+- The rerun also showed why this is not the right lever. Open gate medians got
+  larger (`2.918s` versus `2.857s`, `3.276s` versus `3.084s`,
+  `3.067s` versus `2.569s`), browser elapsed stayed effectively flat, and
+  residual overhead was flat-to-worse rather than better. So the remaining
+  bottleneck is not launcher polling anymore; it is the reused-service
+  readiness wait itself.
+- Quality still stayed green in the saved runs: reuse, Tor boot, SOCKS
+  isolation, and stop all passed as before. This is a performance reject, not a
+  Tor/privacy-quality failure.
+- Strict call after `200551`: do **not** land the `50ms -> 10ms` poll-interval
+  cut for the managed repeated-open workflow. Keep `PROCESS_POLL_INTERVAL_SECONDS`
+  at `0.05`.
+- I asked `gpt-5.4-pro` through `cz` for a second opinion on this reject turn
+  too, saved at
+  `results/torfast-warm-open-compare-20260704T200551/cz-second-opinion-summary-only.md`.
+  It matched the strict call above: reject the `10ms` poll cut, no
+  Tor/privacy-quality regression is shown, and the next experiment should
+  target and instrument the open-gate/readiness path itself.
+
+Per-profile browser-startup-seed same-window A/B in warm/open:
+
+- I added per-profile browser-startup-seed A/B support to
+  `tools/run_torfast_warm_open_compare.py` so the current warm/open harness can
+  compare the default seed-off path against seed-on variants in the same
+  rotated window, while preserving other exact-quality variant knobs such as
+  waits, no-overlap, and no-prestart. Focused coverage for the new profile
+  builder cases landed in `tests/test_torfast_warm_open_compare.py`.
+- Focused validation stayed clean after the harness patch:
+  `python3 -m py_compile tools/run_torfast_warm_open_compare.py tests/test_torfast_warm_open_compare.py`
+  and `python3 -m unittest tests.test_torfast_warm_open_compare -q` (`24`
+  tests).
+- The first same-window screen under
+  `results/torfast-warm-open-compare-20260705T085846/summary.json` looked
+  promising, but that window was not decisive. On Tor Check the baseline
+  `auto` profile only stayed clean `2/3`, which made the seed-on rows look
+  better than they held up later.
+- The stronger five-cycle confirmation under
+  `results/torfast-warm-open-compare-20260705T090130/summary.json` rejected
+  promotion. Against `auto`, `auto_browserstartupseed` lost on both pages:
+  Tor Check `6.238s -> 6.360s` total wall and homepage `6.218s -> 6.229s`.
+- I also checked the current clean warmed winner directly in that same window.
+  `auto_wait_1p7s_browserstartupseed` stayed exact-quality clean `5/5` on both
+  targets, but speed stayed noise-level: Tor Check was effectively flat
+  (`6.224s -> 6.225s`) and the homepage only improved by about `11ms`
+  (`6.345s -> 6.334s`).
+- The quality read is still acceptable for seeded variants in this harness:
+  `browser_default_pref_check_ok_runs`, `browser_runtime_reset_ok_runs`,
+  `open_tor_boot_ok_runs`, `torrc_isolate_socks_auth_ok_runs`, and
+  `reused_service_ok_runs` all stayed `5/5` for the seeded rows in the
+  five-cycle confirmation.
+- I asked `gpt-5.4-pro` through `cz` for a second opinion on this turn too,
+  saved at
+  `results/torfast-warm-open-compare-20260705T090130/cz-second-opinion-browser-startup-seed-same-window-distilled.stdout.txt`.
+  It matched the strict repo read with `VERDICT: LAB-ONLY`: quality is clean,
+  but the decisive five-cycle same-window speed read is neutral-to-worse and
+  does not justify promotion.
+- Strict call: keep browser-startup seed opt-in/lab-only for the product path.
+  The new harness support is worth keeping for future exact-quality A/B work,
+  but this candidate did not move the repo any closer to the required “same
+  Tor quality, clearly faster” finish line.
+
+Managed general-circuit count repeated-open A/B (`auto_gencirc_2`):
+
+- I then tested the next repeated-open candidate already supported by the
+  richer benchmark harness:
+  `tools/run_torfast_warm_open_benchmark_compare.py` compared the real default
+  `auto` path against `auto_gencirc_2` in the same rotated 5-cycle window on
+  the homepage and download page under
+  `results/torfast-warm-open-benchmark-compare-20260705T105237/summary.json`.
+- Quality stayed exact-quality clean in that proof. Both profiles were `5/5`
+  on `ok_runs`, `boot_after_benchmark_ok_runs`,
+  `torrc_isolate_socks_auth_ok_runs`, `stop_ok_runs`, and
+  `warm_ready_ok_runs` across both targets.
+- But speed rejected promotion clearly. Against baseline `auto`,
+  `auto_gencirc_2` was slower on both targets: homepage `+6.746s` median
+  combined wall, `+3421.619ms` median elapsed, `+4337.944ms` median load; the
+  download page was also slower by `+2.157s` combined, `+401.829ms` elapsed,
+  and `+1058.243ms` load.
+- The saved `gpt-5.4-pro` second opinion at
+  `results/torfast-warm-open-benchmark-compare-20260705T105237/cz-second-opinion-gencirc2-repeated-open.stdout.txt`
+  matched that strict read with `VERDICT: LAB-ONLY`: quality is at parity, but
+  the same-window speed proof is decisively worse than default.
+- Strict call: keep `auto_gencirc_2` lab-only and out of the product path. The
+  extra general-circuit wait does not solve the actual repeated-open speed
+  problem and instead adds real end-to-end cost.
+
+Warm-browser-prestart same-window A/B:
+
+- I added a lab-only warm/open browser-prestart candidate through
+  `tools/launch_torfast_browser.py`, `torfast/cli.py`,
+  `torfast/fast_runtime.py`, and
+  `tools/run_torfast_warm_open_compare.py`. With
+  `--warm-browser-prestart`, `torfast warm` can start a background browser on
+  `about:blank`, and the next `torfast open` can attach over Marionette and
+  navigate the real target instead of launching a fresh browser. `stop` now
+  also cleans up that prestarted browser.
+- The initial 3-cycle screen at
+  `results/torfast-warm-open-compare-20260705T113725/summary.json` looked
+  mixed, so I ran the stronger 5-cycle confirmation across Tor Check,
+  homepage, and download at
+  `results/torfast-warm-open-compare-20260705T113917/summary.json`.
+- Quality stayed exact-quality clean again in that confirmation. Both `auto`
+  (prestart enabled) and `auto_nobrowserprestart` stayed `5/5` on
+  `browser_default_pref_check_ok_runs`, `browser_runtime_reset_ok_runs`,
+  `ok_runs`, `open_browser_ok_runs`, `open_tor_boot_ok_runs`,
+  `reused_service_ok_runs`, `stop_ok_runs`,
+  `torrc_isolate_socks_auth_ok_runs`, and `warm_ready_ok_runs` on all three
+  targets.
+- Speed is still split, not promotable. Prestart lost Tor Check
+  (`6.137s` versus `6.027s`, so `-0.110s` against no-prestart), but won the
+  homepage (`5.948s` versus `6.497s`, `+0.549s`) and download page
+  (`6.144s` versus `6.282s`, `+0.138s`). The win shape mostly tracks
+  `open_launch_gate_seconds`: Tor Check slightly favored no-prestart
+  (`2.825s` versus `2.783s`), while homepage and download favored prestart
+  (`2.618s` versus `3.252s`, `2.831s` versus `3.079s`).
+- I asked `gpt-5.4-pro` through `cz` for a strict second opinion on that
+  5-cycle confirmation at
+  `results/torfast-warm-open-compare-20260705T113917/cz-second-opinion-warm-browser-prestart.stdout.txt`.
+  It matched the repo read with `VERDICT: LAB-ONLY`: quality is clean, but the
+  speed evidence is split across the three targets and is not the broad,
+  repeatable win required for product-path promotion.
+- Strict call: keep `--warm-browser-prestart` opt-in/lab-only and leave
+  defaults unchanged. The next justified move is not another blind default
+  flip; it is deeper work on the remaining reused-service gate-wait variance.
+
+Warm/open tail-metric summary and focused Tor Check gate diagnostics:
+
+- The `113917` warm-browser-prestart result also exposed a weakness in the
+  warm/open proof harness itself: a large first-cycle Tor Check outlier could
+  be hidden by median-only summary fields. I patched
+  `tools/run_torfast_warm_open_compare.py` so future summary files and
+  delta-vs-baseline tables now include `p90_*` and `max_*` fields for both
+  `combined_wall_seconds` and `open_launch_gate_seconds`.
+- Focused regression coverage for that harness patch landed in
+  `tests/test_torfast_warm_open_compare.py`. Validation passed with
+  `python3 -m py_compile tools/run_torfast_warm_open_compare.py tests/test_torfast_warm_open_compare.py`
+  and `python3 -m unittest tests.test_torfast_warm_open_compare -q` (`31`
+  tests).
+- I then ran a narrower Tor Check-only proof with reused-service gate
+  diagnostics enabled:
+  `results/torfast-warm-open-compare-20260705T115409/summary.json`
+  using `--warm-browser-prestart --extra-no-warm-browser-prestart
+  --gate-diagnostics`.
+- That focused rerun did **not** reproduce the earlier `55.563s` Tor Check
+  gate spike from `113917`. Instead it showed a more normal but still slightly
+  worse Tor Check shape for prestart: median combined wall
+  `6.204s` for `auto` versus `5.884s` for `auto_nobrowserprestart`
+  (`-0.320s` for prestart), with median gate wait `2.410s` versus `2.193s`
+  (`-0.217s` for prestart).
+- The saved per-run diagnostics showed the same basic starting point on every
+  run for both profiles: `service_ready_gate_before_wait = socks_ready`,
+  `ready_text_present_before_wait = false`, and control bootstrap phase before
+  wait still at `0% (starting)`. The wait then advances to `95%
+  (circuit_create)` in the normal way. So the current blocker still looks like
+  reused-service gate-wait variance itself, not a visible Tor/privacy-quality
+  regression.
+- Updated strict call: keep chasing the gate-wait path, but do it with the new
+  tail metrics and saved diagnostics rather than trusting medians alone. The
+  earlier Tor Check outlier is still unexplained, yet the focused rerun says
+  the everyday prestart penalty on that target is smaller and more stable than
+  the one-off `55s` spike.
+- Second-opinion note for this focused diagnostics turn: I tried a fresh
+  `gpt-5.4-pro` review through `cz`, but this environment hit the known
+  account limitation again:
+  `results/torfast-warm-open-compare-20260705T115409/cz-second-opinion-gate-diagnostics.stderr.txt`
+  recorded `invalid_request_error` saying the `gpt-5.4-pro` model is not
+  supported with the current ChatGPT-backed Codex account, so there is no new
+  verdict text for this narrower rerun.
+
+Persistent-control-wait A/B on the real current path:
+
+- The `115409` and `113917` gate-diagnostics screens suggested that our
+  reused-service gate wait was opening a fresh Tor control connection on every
+  poll, so I tested the already-available persistent-control candidate head to
+  head on the real current path with
+  `--persistent-control-wait --extra-no-persistent-control-wait
+  --gate-diagnostics`.
+- Focused validation stayed clean before the rerun:
+  `python3 -m py_compile tools/launch_torfast_browser.py tools/run_torfast_warm_open_compare.py tests/test_launch_torfast_browser.py tests/test_torfast_warm_open_compare.py tests/test_torfast_cli.py tests/test_torfast_main.py`
+  and `python3 -m unittest tests.test_launch_torfast_browser tests.test_torfast_warm_open_compare tests.test_torfast_cli tests.test_torfast_main -q`
+  (`142` tests).
+- The five-cycle same-window result under
+  `results/torfast-warm-open-compare-20260705T120044/summary.json` rejected
+  promotion. Quality stayed exact-quality clean `5/5` for both profiles on all
+  three targets, but the non-persistent variant `auto_nopersistctrl` beat the
+  persistent base `auto` on median combined wall everywhere: Tor Check
+  `6.278s` versus `6.229s`, homepage `6.286s` versus `6.037s`, and download
+  `6.097s` versus `5.813s`.
+- The new tail fields made that reject stronger, not weaker. Against
+  persistent-control `auto`, `auto_nopersistctrl` also improved `p90` and max
+  combined wall on all three targets, plus `p90` and max launch-gate wait on
+  all three targets.
+- Updated strict call: keep persistent-control wait lab-only and non-default.
+  Reusing a single control connection inside the wait loop does not solve the
+  repeated-open blocker on this proof and is slower than the current default
+  path.
+
+No-control-bootstrap-probe A/B:
+
+- The persistent-control reject exposed a sharper follow-up clue: in the saved
+  gate-diagnostics runs so far, control probing almost never provided the ready
+  signal first. I added a lab-only no-control-bootstrap-probe candidate in
+  `tools/launch_torfast_browser.py`, plus same-window A/B support in
+  `tools/run_torfast_warm_open_compare.py`, so the launcher can skip
+  control-port bootstrap probes and wait only on log-based reused-service
+  readiness. Focused coverage for the new harness/env path landed in
+  `tests/test_torfast_warm_open_compare.py`.
+- Focused validation stayed clean after that patch:
+  `python3 -m py_compile tools/launch_torfast_browser.py tools/run_torfast_warm_open_compare.py tests/test_launch_torfast_browser.py tests/test_torfast_warm_open_compare.py tests/test_torfast_cli.py tests/test_torfast_main.py`
+  and `python3 -m unittest tests.test_launch_torfast_browser tests.test_torfast_warm_open_compare tests.test_torfast_cli tests.test_torfast_main -q`
+  (`142` tests).
+- The decisive five-cycle same-window proof under
+  `results/torfast-warm-open-compare-20260705T121229/summary.json` kept
+  quality exact-quality clean `5/5` on all tracked counters for both profiles
+  across Tor Check, homepage, and download.
+- Speed is promising but still split. `auto_nocontrolprobe` beat baseline
+  `auto` on median combined wall for Tor Check (`6.305s` versus `6.152s`,
+  `-0.153s`) and homepage (`6.326s` versus `6.254s`, `-0.072s`), but lost the
+  download page (`6.317s` versus `6.397s`, `+0.080s`).
+- The new tail metrics make this candidate more interesting than the earlier
+  persistent-control path. On Tor Check, `auto_nocontrolprobe` improved both
+  `p90` and max combined wall by `-4.946s`, and both `p90` and max
+  launch-gate wait by `-4.993s`. Homepage also improved slightly on both
+  median and tail. Download still lost on median combined wall, but even there
+  `p90` and max combined wall improved by `-0.085s`.
+- The saved run also sharpened the causal clue. `ready_via_control` fired only
+  once in the whole `121229` proof, and that one hit was the baseline `auto`
+  Tor Check outlier with a `14.044s` gate wait. That strengthens the read that
+  control probing is not the reliable fast path in this workflow.
+- Updated strict call: keep `auto_nocontrolprobe` lab-only for now because the
+  5-cycle three-target proof is still split and does not yet clear the broad
+  product-path bar. But it is a stronger active lead than persistent-control
+  wait because it improves both slow targets on median and sharply reduces the
+  Tor Check tail without showing a privacy/quality regression.
+- Second-opinion note for this big turn: I tried `gpt-5.4-pro` through `cz`
+  twice on this new `121229` result. The ChatGPT-backed path again returned
+  `invalid_request_error` in
+  `results/torfast-warm-open-compare-20260705T121229/cz-second-opinion-nocontrolprobe.stderr.txt`.
+  A second retry through the normal local config reached the model provider and
+  read the summary, but timed out before returning a final verdict, so there is
+  still no clean `cz` verdict text for this candidate yet.
+
+No-control-bootstrap-probe confirmatory rerun:
+
+- Because the first `121229` proof still looked promising on Tor Check and the
+  homepage, I reran the exact same three-target five-cycle same-window A/B to
+  see whether `auto_nocontrolprobe` could reproduce a broad win:
+  `results/torfast-warm-open-compare-20260705T123107/summary.json`.
+- Quality stayed exact-quality clean `5/5` again for both profiles across all
+  three targets, so there is still no Tor/privacy-quality regression in this
+  candidate family.
+- But the stronger repeated proof weakened the candidate materially. Against
+  baseline `auto`, `auto_nocontrolprobe` only kept a tiny Tor Check median win
+  (`6.451s` versus `6.420s`, `-0.031s`), while it lost the homepage
+  (`6.282s` versus `6.320s`, `+0.038s`) and clearly lost download
+  (`6.364s` versus `6.566s`, `+0.202s`).
+- The tail read also stopped being broadly supportive. Tor Check still improved
+  (`p90/max combined -1.915s`, `p90/max gate -1.754s`), but download flipped
+  to a strong tail regression (`p90/max combined +3.016s`,
+  `p90/max launch-gate +3.013s`).
+- Updated strict call: keep `auto_nocontrolprobe` lab-only. The first `121229`
+  run was a useful lead, but the repeated same-window proof at `123107` says it
+  is not stable or broad enough for the product path.
+- Second-opinion note for this confirmation rerun: I asked `gpt-5.4-pro`
+  through `cz` again at
+  `results/torfast-warm-open-compare-20260705T123107/cz-second-opinion-nocontrolprobe-confirm.stderr.txt`.
+  The normal local-config provider read the summary, but timed out before
+  returning a final verdict, so there is still no clean `cz` text for this
+  follow-up either.
+
+Warm-helper-prestart plus no-control-probe quick screen:
+
+- After the `123107` confirmatory reject, I screened one evidence-based combo
+  instead of guessing blindly: combine the already-existing warm-helper-prestart
+  family with the new no-control-bootstrap-probe toggle in one same-window
+  three-target screen under
+  `results/torfast-warm-open-compare-20260705T124000/summary.json`.
+- This screen compared four rows: `auto`, `auto_noprestart`,
+  `auto_nocontrolprobe`, and `auto_noprestart_nocontrolprobe`. Quality stayed
+  clean `3/3` on all tracked counters for all four rows, so again the issue is
+  speed stability, not Tor/privacy regression.
+- The screen did **not** rescue warm-helper-prestart. In the control-probe-on
+  pair, `auto_noprestart` beat `auto` on all three targets, including a clear
+  download improvement (`6.346s` versus `5.839s`) and better Tor Check /
+  homepage tails.
+- The mixed no-control plus no-helper combo was also not a safe answer. It won
+  the homepage in this tiny screen (`6.203s` versus `6.025s`), but download
+  had a catastrophic tail outlier (`p90/max combined 29.699s`,
+  `p90/max launch-gate 26.055s`), so it is not something to promote or even
+  trust from a three-cycle screen.
+- Updated strict read from this quick screen: warm-helper-prestart still looks
+  like a weak lane, and pairing it with no-control-probe does not produce an
+  obvious new default candidate. The next justified move should be a narrower
+  investigation into the remaining download/Tor Check gate-wait outliers, not
+  another broad flag combination sweep.

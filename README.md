@@ -10,6 +10,36 @@ Goal: build a faster Tor-like client/browser without dropping Tor quality.
 This repo starts from one rule: speed is only real if privacy, safety, and
 compatibility stay the same.
 
+<p align="center">
+  <img src="docs/assets/torfast-demo.svg" alt="torfast terminal demo: torfast open delivers the page with a verified receipt, torfast status shows the warm managed Tor" width="760">
+</p>
+
+Every number in the demo comes from the latest green verifier artifact
+(`results/torfast-promoted-quality-check-20260707T002336`); only the replay
+timeline is compressed. The browser polish lives strictly where websites
+cannot see it: the torfast zen UI is chrome-only `userChrome.css` (tabs,
+toolbar, urlbar) written into each generated profile, held to a hard
+geometry rule — no property that could move the content viewport — and
+enforced by test, so the fingerprint surface websites can measure stays
+byte-identical to stock Tor Browser. Pass `--stock-ui` for the untouched
+stock chrome.
+
+## Latest verified result
+
+Five cycles, three targets, both profiles interleaved in one network window
+([scorecard](docs/latest-scorecard.md), regenerable with
+`python3 tools/render_verifier_scorecard.py`):
+
+| target | open browser, torfast (median) | open browser, stock profile (median) |
+|---|---:|---:|
+| check.torproject.org | **4.4s** | 11.2s |
+| www.torproject.org | **4.4s** | 12.3s |
+| www.torproject.org/download | **4.4s** | 12.0s |
+
+Same run, quality side: 30/30 runtime quality gates green, 15/15 pairwise
+fingerprint checks clean, circuit path rules clean on every target, and
+Conflux proven live at runtime (6/6/4 linked legs).
+
 ## Public repo status
 
 - one maintainer owns issue triage, review, releases, docs, benchmarks, and quality checks
@@ -45,16 +75,27 @@ policy with private reporting.
 For contribution rules, see [CONTRIBUTING.md](CONTRIBUTING.md). For community
 rules, see [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). For sensitive issues, see
 [SECURITY.md](SECURITY.md). For the short public proof page, see
-[docs/proof-summary.md](docs/proof-summary.md).
+[docs/proof-summary.md](docs/proof-summary.md). For why "exact Tor anonymity
+at clearnet speed" is structurally bounded and where the real headroom is,
+see [docs/anonymity-speed-research.md](docs/anonymity-speed-research.md).
 
 ## Current proof highlights
 
 - C Tor Conflux, with standard 3-hop circuits kept intact, showed about `2-3x`
-  bulk-download throughput versus disabling it. See
+  bulk-download throughput versus disabling it. Conflux is the shipped
+  default, and the circuit quality check now proves it is live at runtime
+  (linked conflux legs on the control port, held to the same path rules), so
+  the win cannot silently regress. See
   [docs/latest-results.md](docs/latest-results.md).
 - The `torfast` runtime path now has saved proof for faster repeated open and
-  warm/open flows without changing Tor Browser privacy rules. See
+  warm/open flows without changing Tor Browser privacy rules, and the proven
+  faster adaptive-circuit-wait profile is the product default. See
   [docs/latest-results.md](docs/latest-results.md).
+- Runtime quality proof is captured on the requested page itself: canvas
+  extraction blocked, `resistFingerprinting` timezone spoof live, and the
+  stable fingerprint surface equal to a stock-launched reference of the same
+  build. A target-navigation keeper guarantees the requested page is what the
+  finished browser shows.
 - The repo keeps quality gates for path safety, browser prefs, and Arti/C Tor
   checks so faster runs can be rejected when the privacy bar is not met.
 
@@ -65,6 +106,73 @@ python3 -m pip install -e .
 torfast install-browser
 torfast launch
 ```
+
+On a terminal the CLI shows human output: a status panel, a doctor
+checklist, and a launch receipt with the measured timings. Piping any
+command (or passing `--json`) always yields the exact machine JSON, and
+`NO_COLOR` is respected, so scripts and benchmark harnesses see no change.
+
+## Speed profiles
+
+torfast has one slider, and it never touches anonymity:
+
+```sh
+torfast profile            # show the profiles
+torfast profile turbo      # save a default
+torfast open --profile paranoid   # override for one run
+```
+
+- `⚡ turbo` — keep the managed Tor service, runtime helper, and directory
+  seeds warm; `launch` behaves like `open`, so every start reuses the warm
+  service (repeated opens around `1s`).
+- `● balanced` — the shipped default: warm managed opens, cold one-shot
+  launches.
+- `○ paranoid` — nothing resident, nothing cached: every open is a cold
+  one-shot on a fresh state root, with no shared seeds and no runtime
+  helper (`torfast warm` is refused).
+
+What a profile may change: what stays resident or cached *locally on your
+machine* between runs. What no profile can change: 3-hop circuits, the
+stock browser fingerprint, and the quality gates. The paranoid level exists
+for people who want zero persistent local state, not because the faster
+levels are less anonymous on the network — they are not.
+
+The active profile shows up in `torfast status`, in launch receipts, and in
+the saved launch plan (`profile` field), so every measurement records which
+level produced it.
+
+## A real app, not a stray window
+
+```sh
+torfast install-app
+```
+
+This generates **Torfast.app** (into `/Applications`, or `~/Applications`
+when that is not writable) with its own generated icon, and it behaves
+like any other browser app: click it — Dock, Spotlight (`⌘Space` →
+"torfast"), or Launchpad — and you get an instant "Opening the private
+browser…" notification while the themed browser comes up over the warm
+managed Tor, no terminal involved. Clicking it again while the browser is
+open focuses the existing window instead of relaunching; clicking during
+warm-up is a safe no-op. Failures surface as a macOS notification and land
+in `~/Library/Logs/torfast-app.log`.
+
+The browser the app opens is **branded Torfast all the way through the
+OS**: `install-app` clones the verified Tor Browser bundle (APFS
+clonefile, near-zero disk) into a torfast-owned copy and rebrands only
+OS-level identity — Dock icon, app name, bundle identifier — so the Dock
+shows the bolt, not the onion. Nothing a website can measure changes: the
+binaries, defaults, and content-visible surface stay byte-identical to
+the verified build, your real Tor Browser install is never touched, and
+`torfast` CLI runs and benchmarks keep launching the stock-identity copy.
+Pass `--no-branded-browser` to skip it.
+
+It also installs an **"Open Torfast" Quick Action**, so you can summon the
+browser from anywhere with a global keyboard shortcut: bind one under
+System Settings → Keyboard → Keyboard Shortcuts → Services → General →
+Open Torfast. Inside the browser, the usual shortcuts are already there —
+it is Firefox under the hood, so `⌘T`, `⌘L`, `⌘W`, `⌘⇧T` and friends all
+behave like every other browser.
 
 ## Current stance
 
@@ -117,6 +225,12 @@ Current Arti local lab patches:
 - `docs/architecture.md` - the first design for a fast but Tor-compatible build.
 - `docs/roadmap.md` - work order.
 - `torfast/path_rules.py` - a small checker for 3-hop path safety rules.
+- `torfast/profiles.py` - the turbo/balanced/paranoid speed profiles; local
+  warmth and caching only, never circuits or fingerprint.
+- `torfast/theme.py` - the zen UI userChrome theme, geometry-safe by rule
+  and by test (`tests/test_theme.py`).
+- `torfast/app_bundle.py` + `torfast/app_icon.py` - the Torfast.app
+  generator and its stdlib-only icon renderer (`torfast install-app`).
 - `tools/bench_http.py` - a no-dependency HTTP/HTTPS benchmark for direct or
   SOCKS proxy traffic.
 - `scripts/fetch_upstreams.sh` - fetches shallow C Tor and Arti source trees.
@@ -340,11 +454,11 @@ full `Bootstrapped 100%`, so one-shot launch overlaps browser startup with the
 last part of Tor boot. Cold direct network URLs still default to the lighter
 `Bootstrapped 95%` gate, and you can still override with
 `--browser-launch-gate ...` for lab checks. When the managed Tor service is
-already warm or being warmed for reuse, `auto` now uses the faster
-`socks_ready` gate on that managed path instead. `torfast warm` now returns
-once the managed service reaches its current ready gate, and a later
-`torfast open` waits only for the target gate it still needs before browser
-start.
+already warm or being warmed for reuse, `auto` now lets managed warm-only
+prestarts return at `socks_ready`, while reused network `torfast open` keeps
+the safer `Bootstrapped 95%` gate. `torfast warm` now returns once the managed
+service reaches its current ready gate, and a later `torfast open` waits only
+for the target gate it still needs before browser start.
 
 By default, `torfast launch` and `torfast plan` now generate a fresh state root
 under `tmp/torfast-launches/` so the proven cache-only Tor seed can apply again
@@ -381,6 +495,13 @@ Benchmark real page loads after `torfast warm` on the managed workflow:
 
 ```sh
 python3 tools/run_torfast_warm_open_benchmark_compare.py --profiles auto tor_boot_95 --cycles 4
+```
+
+Probe same-window warm/open homepage browser-lab variants without changing the
+base profile defaults:
+
+```sh
+python3 tools/run_torfast_warm_open_benchmark_compare.py --targets https://www.torproject.org/ --profiles auto --cycles 2 --extra-browser-max-persistent-connections-per-server 7 --extra-browser-block-url-substring /static/fonts/fontawesome/png/white/brands/
 ```
 
 For fair warm-path wait A/B checks, add
@@ -434,6 +555,12 @@ browser, and now returns once that managed service reaches its current ready
 gate instead of always waiting for full boot. A later `torfast open` on that
 same service waits only for the remaining target gate it still needs, while
 still clearing the old browser home/profile directories before each open.
+The managed helper also keeps promoting that warm service toward
+`tor_boot_95`/`tor_boot_100` in the background. A built-in fixed settle window
+for immediate warmed opens is still experimental and stays off by default,
+because the integrated same-window A/B reads are not yet a clean win. The
+strongest measured warmed-path read is still the manual lab workflow where you
+let the warm service age briefly before opening.
 
 When enabled with `--browser-startup-seed`, `torfast` updates a separate shared
 startup-only browser seed from safe bundled-extension artifacts
@@ -673,7 +800,7 @@ Check observable C Tor circuit quality:
 python3 tools/check_c_tor_circuits.py
 ```
 
-Check Arti source/config quality defaults:
+Check current shipped Arti source/config quality defaults:
 
 ```sh
 python3 tools/check_arti_quality_config.py

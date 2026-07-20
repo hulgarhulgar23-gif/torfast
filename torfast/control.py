@@ -40,6 +40,126 @@ class TorControlClient:
         self.sock.close()
 
 
+def read_general_circuit_snapshot_with_client(
+    client: TorControlClient,
+) -> dict[str, object]:
+    started = time.monotonic()
+    circuits = parse_circuits(client.command("GETINFO circuit-status"))
+    matched = [circuit for circuit in circuits if is_built_general_circuit(circuit)]
+    first = matched[0] if matched else None
+    purpose_counts = matched_circuit_count_by_purpose(matched)
+    return {
+        "ok": True,
+        "seconds": round(time.monotonic() - started, 3),
+        "total_circuit_count": len(circuits),
+        "matched_circuit_count": len(matched),
+        "matched_circuit_count_by_purpose": purpose_counts,
+        "has_built_general_circuit": bool(matched),
+        "first_circuit_id": first.get("id") if isinstance(first, dict) else None,
+        "first_purpose": first.get("purpose") if isinstance(first, dict) else None,
+        "first_path_length": (
+            len(first.get("path", [])) if isinstance(first, dict) else None
+        ),
+    }
+
+
+def read_general_circuit_snapshot(
+    *,
+    host: str,
+    port: int,
+    cookie_path: Path,
+) -> dict[str, object]:
+    client: TorControlClient | None = None
+    try:
+        client = TorControlClient.connect(
+            host=host,
+            port=port,
+            cookie_path=cookie_path,
+        )
+        return read_general_circuit_snapshot_with_client(client)
+    except (FileNotFoundError, OSError, RuntimeError, EOFError) as exc:
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    finally:
+        if client is not None:
+            client.close()
+
+
+def read_user_stream_snapshot(
+    *,
+    host: str,
+    port: int,
+    cookie_path: Path,
+    target_substrings: list[str] | None = None,
+    known_stream_ids: set[str] | None = None,
+) -> dict[str, object]:
+    started = time.monotonic()
+    client: TorControlClient | None = None
+    try:
+        client = TorControlClient.connect(
+            host=host,
+            port=port,
+            cookie_path=cookie_path,
+        )
+        result = read_user_stream_snapshot_with_client(
+            client,
+            target_substrings=target_substrings,
+            known_stream_ids=known_stream_ids,
+        )
+    except (FileNotFoundError, OSError, RuntimeError, EOFError) as exc:
+        return {
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "target_substrings": target_substrings or [],
+        }
+    finally:
+        if client is not None:
+            client.close()
+    if result.get("ok") is True:
+        result["seconds"] = round(time.monotonic() - started, 3)
+    return result
+
+
+def read_user_stream_snapshot_with_client(
+    client: TorControlClient,
+    *,
+    target_substrings: list[str] | None = None,
+    known_stream_ids: set[str] | None = None,
+) -> dict[str, object]:
+    streams = parse_streams(client.command("GETINFO stream-status"))
+    circuits = parse_circuits(client.command("GETINFO circuit-status"))
+    matched: list[dict[str, object]] = []
+    for stream in streams:
+        stream_id = stream.get("id")
+        if not isinstance(stream_id, str):
+            stream_id = None
+        direct_match = is_user_socks_stream(
+            stream,
+            target_substrings=target_substrings,
+        )
+        sticky_match = bool(
+            stream_id is not None
+            and known_stream_ids is not None
+            and stream_id in known_stream_ids
+        )
+        if direct_match and stream_id is not None and known_stream_ids is not None:
+            known_stream_ids.add(stream_id)
+        if not (direct_match or sticky_match):
+            continue
+        if stream_id is not None and known_stream_ids is not None:
+            known_stream_ids.add(stream_id)
+        matched.append(stream)
+    return summarize_user_stream_snapshot(
+        matched,
+        circuits=circuits,
+        seconds=0.0,
+        total_stream_count=len(streams),
+        target_substrings=target_substrings or [],
+    )
+
+
 def wait_for_general_circuit(
     *,
     host: str,
@@ -97,6 +217,7 @@ def wait_for_general_circuits(
             if len(matched) >= min_count:
                 first = matched[0]
                 ready_seconds = round(time.monotonic() - started, 3)
+                purpose_counts = matched_circuit_count_by_purpose(matched)
                 return {
                     "ok": True,
                     "seconds": ready_seconds,
@@ -104,6 +225,7 @@ def wait_for_general_circuits(
                     "purpose": first.get("purpose"),
                     "path_length": len(first.get("path", [])),
                     "matched_circuit_count": len(matched),
+                    "matched_circuit_count_by_purpose": purpose_counts,
                     "min_count": min_count,
                 }
             time.sleep(poll_interval)
@@ -172,6 +294,18 @@ def is_built_general_circuit(circuit: dict[str, object]) -> bool:
     )
 
 
+def matched_circuit_count_by_purpose(
+    circuits: list[dict[str, object]],
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for circuit in circuits:
+        purpose = circuit.get("purpose")
+        if not isinstance(purpose, str) or not purpose:
+            purpose = "UNKNOWN"
+        counts[purpose] = counts.get(purpose, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def parse_streams(reply: str) -> list[dict[str, object]]:
     streams: list[dict[str, object]] = []
     for line in reply.splitlines():
@@ -219,13 +353,16 @@ def is_user_socks_stream(
     *,
     target_substrings: list[str] | None = None,
 ) -> bool:
+    target = stream.get("target")
+    if target_substrings and isinstance(target, str):
+        if any(substring in target for substring in target_substrings):
+            return True
     if stream.get("client_protocol") != "SOCKS5":
         return False
     if not isinstance(stream.get("socks_username"), str):
         return False
     if not isinstance(stream.get("socks_password"), str):
         return False
-    target = stream.get("target")
     if target_substrings and isinstance(target, str):
         return any(substring in target for substring in target_substrings)
     return True
@@ -365,3 +502,83 @@ def summarize_stream_isolation(
         "iso_fields": iso_fields,
         "target_substrings": target_substrings,
     }
+
+
+def summarize_user_stream_snapshot(
+    streams: list[dict[str, object]],
+    *,
+    circuits: list[dict[str, object]],
+    seconds: float,
+    total_stream_count: int,
+    target_substrings: list[str],
+) -> dict[str, object]:
+    summary = summarize_stream_isolation(
+        streams,
+        seconds=seconds,
+        polls=1,
+        target_substrings=target_substrings,
+    )
+    circuits_by_id = {
+        str(circuit["id"]): circuit
+        for circuit in circuits
+        if isinstance(circuit, dict) and isinstance(circuit.get("id"), str)
+    }
+    status_counts: dict[str, int] = {}
+    streams_per_circuit: dict[str, int] = {}
+    circuit_purpose_counts: dict[str, int] = {}
+    matched_path_lengths: dict[int, int] = {}
+    for stream in streams:
+        status = stream.get("status")
+        if isinstance(status, str) and status:
+            status_counts[status] = status_counts.get(status, 0) + 1
+        circuit_id = stream.get("circuit_id")
+        if not isinstance(circuit_id, str) or not circuit_id:
+            continue
+        streams_per_circuit[circuit_id] = streams_per_circuit.get(circuit_id, 0) + 1
+        circuit = circuits_by_id.get(circuit_id)
+        if not isinstance(circuit, dict):
+            continue
+        purpose = circuit.get("purpose")
+        if isinstance(purpose, str) and purpose:
+            circuit_purpose_counts[purpose] = (
+                circuit_purpose_counts.get(purpose, 0) + 1
+            )
+        path = circuit.get("path")
+        if isinstance(path, list):
+            path_length = len(path)
+            matched_path_lengths[path_length] = (
+                matched_path_lengths.get(path_length, 0) + 1
+            )
+    user_stream_count = len(streams)
+    max_streams_per_circuit = max(streams_per_circuit.values()) if streams_per_circuit else 0
+    summary.update(
+        {
+            "total_stream_count": total_stream_count,
+            "user_stream_count": user_stream_count,
+            "status_counts": dict(sorted(status_counts.items())),
+            "unique_circuit_count": len(streams_per_circuit),
+            "max_streams_per_circuit": max_streams_per_circuit,
+            "single_circuit_share_pct": (
+                round((max_streams_per_circuit / user_stream_count) * 100.0, 3)
+                if user_stream_count > 0
+                else 0.0
+            ),
+            "circuit_purpose_counts": dict(sorted(circuit_purpose_counts.items())),
+            "matched_circuit_path_length_counts": dict(
+                sorted(matched_path_lengths.items())
+            ),
+        }
+    )
+    return summary
+
+
+def user_stream_snapshot_observed(snapshot: object) -> bool:
+    if not isinstance(snapshot, dict):
+        return False
+    user_stream_count = snapshot.get("user_stream_count")
+    if isinstance(user_stream_count, int) and user_stream_count > 0:
+        return True
+    observed_stream_count = snapshot.get("observed_stream_count")
+    return (
+        isinstance(observed_stream_count, int) and observed_stream_count > 0
+    )

@@ -8,6 +8,7 @@ __pycache__/
 build/
 dist/
 results/
+results-archive/
 tmp/
 upstream/
 downloads/

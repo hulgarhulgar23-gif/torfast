@@ -100,6 +100,9 @@ def main() -> int:
     if boot_directory_failure_rows(payload):
         print_boot_directory_failure_table(payload)
         print()
+    if hspool_client_hsdir_timeout_cap_rows(payload):
+        print_hspool_client_hsdir_timeout_cap_table(payload)
+        print()
     print_performance_table(payload)
     print()
     if pre_network_cancel_summary_rows(payload):
@@ -305,6 +308,9 @@ def main() -> int:
         print()
         print_browser_resource_stream_gap_context(payload)
         print()
+        if browser_resource_stream_gap_hs_context_rows(payload):
+            print_browser_resource_stream_gap_hs_context(payload)
+            print()
         print_browser_resource_stream_gap_phase_summary(payload)
         print()
         print_browser_resource_stream_gap_byte_context(payload)
@@ -936,6 +942,56 @@ def print_boot_directory_timeline_table(payload: dict[str, object]) -> None:
                 max_transfer=fmt(row.get("terminal_summary_max_transfer_ms")),
                 max_gap=fmt(row.get("terminal_summary_max_data_gap_ms")),
                 relay_mib=fmt(row.get("terminal_summary_relay_mib")),
+            )
+        )
+
+
+def print_hspool_client_hsdir_timeout_cap_table(
+    payload: dict[str, object]
+) -> None:
+    print("## HSDir Timeout Cap Attribution")
+    print()
+    print(
+        "| profile | startup only | post boot only | configured cap ms | boot s | first ClientHsDir after boot s | first availability after boot s | cap enabled | cap configured | decision rows | cap applied rows | first decision after boot s | first enable after boot s | first disable after boot s | enabled requests before disable | summary |"
+    )
+    print(
+        "|---|---|---|---:|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---|"
+    )
+    for row in hspool_client_hsdir_timeout_cap_rows(payload):
+        print(
+            "| {profile} | {startup_only} | {post_boot_only} | {configured_cap_ms} | {boot_seconds} | "
+            "{first_client_hsdir_after_boot_s} | {first_availability_after_boot_s} | "
+            "{cap_enabled} | {cap_configured} | {decision_rows} | {cap_applied_rows} | "
+            "{first_decision_after_boot_s} | {first_enable_after_boot_s} | {first_disable_after_boot_s} | "
+            "{enabled_client_hsdir_requests_before_disable} | {summary} |".format(
+                profile=row.get("profile", ""),
+                startup_only=yes_no_unknown(row.get("startup_only")),
+                post_boot_only=yes_no_unknown(row.get("post_boot_only")),
+                configured_cap_ms=fmt(row.get("configured_cap_ms")),
+                boot_seconds=fmt(row.get("boot_seconds")),
+                first_client_hsdir_after_boot_s=fmt(
+                    row.get("first_client_hsdir_after_boot_s")
+                ),
+                first_availability_after_boot_s=fmt(
+                    row.get("first_availability_after_boot_s")
+                ),
+                cap_enabled=yes_no_unknown(row.get("first_availability_cap_enabled")),
+                cap_configured=yes_no_unknown(
+                    row.get("first_availability_cap_configured")
+                ),
+                decision_rows=fmt(row.get("decision_rows")),
+                cap_applied_rows=fmt(row.get("cap_applied_rows")),
+                first_decision_after_boot_s=fmt(
+                    row.get("first_decision_after_boot_s")
+                ),
+                first_enable_after_boot_s=fmt(row.get("first_enable_after_boot_s")),
+                first_disable_after_boot_s=fmt(
+                    row.get("first_disable_after_boot_s")
+                ),
+                enabled_client_hsdir_requests_before_disable=fmt(
+                    row.get("enabled_client_hsdir_requests_before_disable")
+                ),
+                summary=format_table_text(row.get("summary"), max_len=120),
             )
         )
 
@@ -7920,6 +7976,51 @@ def print_browser_resource_stream_gap_context(
         )
 
 
+def print_browser_resource_stream_gap_hs_context(
+    payload: dict[str, object], limit: int = 20
+) -> None:
+    print("## Browser Resource Stream Gap HS Context")
+    print()
+    print(
+        "| profile | target | run | timing id | circuit | stream | gap ms | gap phase | request -> ready ms | hs connect ids | state ids | shared hits | rend est ms | hs ready ms | state task ms | tunnel ms | begin phase ms | hspool events | hspool stems | hspool summary | hspool max elapsed ms |"
+    )
+    print(
+        "|---|---|---:|---:|---|---:|---:|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|---:|"
+    )
+    for row in browser_resource_stream_gap_hs_context_rows(payload)[:limit]:
+        print(
+            "| {profile} | {target} | {run} | {timing_id} | {circ} | {stream} | {gap} | {phase} | {ready} | {connect_ids} | {state_ids} | {shared_hits} | {rend_est} | {hs_ready} | {state_task} | {tunnel} | {begin_phase} | {hspool_events} | {hspool_stems} | {hspool_summary} | {hspool_max} |".format(
+                profile=row.get("profile", ""),
+                target=row.get("target", ""),
+                run=fmt(row.get("run_index")),
+                timing_id=fmt(row.get("timing_id")),
+                circ=row.get("circ_id", ""),
+                stream=fmt(row.get("stream_id")),
+                gap=fmt(row.get("gap_ms")),
+                phase=row.get("gap_phase") or "",
+                ready=fmt(row.get("request_to_stream_ready_ms")),
+                connect_ids=format_table_text(
+                    row.get("hs_connect_ids"), max_len=80
+                ),
+                state_ids=format_table_text(row.get("hs_state_ids"), max_len=80),
+                shared_hits=fmt(row.get("hs_shared_cache_hits")),
+                rend_est=fmt(row.get("hs_rend_established_ms")),
+                hs_ready=fmt(row.get("hs_circuit_established_ms")),
+                state_task=fmt(row.get("hs_state_task_ms")),
+                tunnel=fmt(row.get("hs_tunnel_ms")),
+                begin_phase=fmt(row.get("hs_begin_phase_ms")),
+                hspool_events=fmt(row.get("hspool_events_in_setup")),
+                hspool_stems=format_table_text(
+                    row.get("hspool_stem_kinds"), max_len=80
+                ),
+                hspool_summary=format_table_text(
+                    row.get("hspool_event_counts"), max_len=120
+                ),
+                hspool_max=fmt(row.get("hspool_max_elapsed_ms")),
+            )
+        )
+
+
 def print_browser_resource_stream_gap_phase_summary(
     payload: dict[str, object],
 ) -> None:
@@ -12757,6 +12858,9 @@ def parse_torfast_hspool_timings(lines: list[str]) -> list[dict[str, object]]:
             for key, value in re.findall(r"\b([a-zA-Z_]+)=([^ ]+)", line)
         }
         fields["event"] = event
+        timestamp_ms = parse_log_timestamp_ms(line)
+        if timestamp_ms is not None:
+            fields["timestamp_ms"] = timestamp_ms
         timings.append(fields)
     return timings
 
@@ -12793,7 +12897,13 @@ def parse_torfast_hs_client_timings(lines: list[str]) -> list[dict[str, object]]
             key: parse_log_value(value)
             for key, value in re.findall(r"\b([a-zA-Z_]+)=([^ ]+)", line)
         }
+        tunnel_unique_id = parse_torfast_tunnel_unique_id(line)
+        if tunnel_unique_id is not None:
+            fields["tunnel_unique_id"] = tunnel_unique_id
         fields["event"] = event
+        timestamp_ms = parse_log_timestamp_ms(line)
+        if timestamp_ms is not None:
+            fields["timestamp_ms"] = timestamp_ms
         timings.append(fields)
     return timings
 
@@ -13668,6 +13778,14 @@ def torfast_hs_event_name(line: str) -> str | None:
 
 
 def torfast_hspool_event_name(line: str) -> str | None:
+    if "client hsdir extend timeout availability" in line:
+        return "client_hsdir_extend_timeout_availability"
+    if "client hsdir extend timeout decision" in line:
+        return "client_hsdir_extend_timeout_decision"
+    if "client hsdir extend timeout cap enabled after bootstrap" in line:
+        return "client_hsdir_extend_timeout_enabled_after_bootstrap"
+    if "client hsdir extend timeout cap disabled after bootstrap" in line:
+        return "client_hsdir_extend_timeout_disabled_after_bootstrap"
     if "timing stem selected" in line:
         return "stem_selected"
     if "timing stem ready" in line:
@@ -16857,6 +16975,182 @@ def browser_resource_stream_gap_context_rows(
     )
 
 
+def browser_resource_stream_gap_hs_context_rows(
+    payload: dict[str, object],
+) -> list[dict[str, object]]:
+    run_map = {
+        (str(profile_name), str(target), run.get("run_index")): run
+        for profile_name, _profile, target, _summary, run in iter_runs(payload)
+        if isinstance(run, dict)
+    }
+    run_context_cache: dict[tuple[str, str, object], dict[str, object]] = {}
+    rows: list[dict[str, object]] = []
+
+    for gap_row in browser_resource_stream_gap_context_rows(payload):
+        profile = str(gap_row.get("profile", ""))
+        target = str(gap_row.get("target", ""))
+        run_index = gap_row.get("run_index")
+        timing_id = gap_row.get("timing_id")
+        if timing_id is None:
+            continue
+        key = (profile, target, run_index)
+        run = run_map.get(key)
+        if not isinstance(run, dict):
+            continue
+
+        run_context = run_context_cache.get(key)
+        if run_context is None:
+            lines = dedupe_lines(run_torfast_lines(run))
+            run_context = {
+                "socks": group_torfast_socks_timings(parse_torfast_socks_timings(lines)),
+                "hs": parse_torfast_hs_timings(lines),
+                "hs_client": parse_torfast_hs_client_timings(lines),
+                "hs_state": parse_torfast_hs_state_timings(lines),
+                "hspool": parse_torfast_hspool_timings(lines),
+            }
+            run_context_cache[key] = run_context
+
+        hs_rows = [
+            row
+            for row in run_context["hs"]
+            if row.get("timing_id") == timing_id
+        ]
+        client_rows = [
+            row
+            for row in run_context["hs_client"]
+            if row.get("timing_id") == timing_id
+        ]
+        state_rows = [
+            row
+            for row in run_context["hs_state"]
+            if row.get("timing_id") == timing_id
+            or row.get("owner_timing_id") == timing_id
+        ]
+        if not hs_rows and not client_rows and not state_rows:
+            continue
+
+        socks_row = run_context["socks"].get(timing_id, {})
+        request_epoch = numeric(socks_row.get("conn_started_epoch_ms"))
+        request_to_stream_ready_ms = (
+            numeric(socks_row.get("stream_elapsed_ms"))
+            or numeric(socks_row.get("connect_ms"))
+            or numeric(socks_row.get("reply_elapsed_ms"))
+        )
+        # Retained proxy logs are second-granular, so keep a short lead-in window
+        # to avoid dropping same-second prebuild rows that started just before the
+        # SOCKS request timestamp.
+        setup_start_epoch = (
+            request_epoch - 1000 if request_epoch is not None else None
+        )
+        setup_end_epoch = (
+            request_epoch + request_to_stream_ready_ms
+            if request_epoch is not None and request_to_stream_ready_ms is not None
+            else None
+        )
+
+        matching_timestamps = [
+            numeric(row.get("timestamp_ms"))
+            for row in [*hs_rows, *client_rows, *state_rows]
+            if numeric(row.get("timestamp_ms")) is not None
+        ]
+        if matching_timestamps:
+            earliest = min(matching_timestamps)
+            latest = max(matching_timestamps)
+            if setup_start_epoch is None or earliest < setup_start_epoch:
+                setup_start_epoch = earliest
+            if setup_end_epoch is None or latest > setup_end_epoch:
+                setup_end_epoch = latest
+
+        hspool_rows = []
+        for row in run_context["hspool"]:
+            timestamp_ms = numeric(row.get("timestamp_ms"))
+            if timestamp_ms is None:
+                continue
+            if setup_start_epoch is not None and timestamp_ms < setup_start_epoch:
+                continue
+            if setup_end_epoch is not None and timestamp_ms > setup_end_epoch:
+                continue
+            hspool_rows.append(row)
+
+        hspool_event_counts: dict[str, int] = {}
+        for row in hspool_rows:
+            event = row.get("event")
+            if not isinstance(event, str) or not event:
+                continue
+            hspool_event_counts[event] = hspool_event_counts.get(event, 0) + 1
+
+        rows.append(
+            {
+                "profile": profile,
+                "target": target,
+                "run_index": run_index,
+                "timing_id": timing_id,
+                "circ_id": gap_row.get("circ_id"),
+                "stream_id": gap_row.get("stream_id"),
+                "gap_ms": gap_row.get("gap_ms"),
+                "gap_phase": gap_row.get("top_overlap_phase"),
+                "request_to_stream_ready_ms": request_to_stream_ready_ms,
+                "hs_connect_ids": compact_list(
+                    [
+                        row.get("hs_connect_id")
+                        for row in hs_rows
+                        if row.get("hs_connect_id") not in {None, ""}
+                    ],
+                    max_items=8,
+                ),
+                "hs_state_ids": compact_list(
+                    [
+                        row.get("state_id")
+                        for row in state_rows
+                        if row.get("state_id") not in {None, ""}
+                    ],
+                    max_items=8,
+                ),
+                "hs_shared_cache_hits": count_events(
+                    hs_rows, "descriptor_shared_cache_hit"
+                ),
+                "hs_rend_established_ms": event_max(
+                    hs_rows, "rendezvous_established", "connect_elapsed_ms"
+                ),
+                "hs_circuit_established_ms": event_max(
+                    hs_rows, "circuit_established", "connect_elapsed_ms"
+                ),
+                "hs_state_task_ms": event_max(
+                    state_rows, "connect_task_finished", "elapsed_ms"
+                ),
+                "hs_tunnel_ms": event_max(
+                    client_rows, "tunnel_ready", "elapsed_ms"
+                ),
+                "hs_begin_phase_ms": event_max(
+                    client_rows, "begin_stream_finished", "begin_phase_ms"
+                ),
+                "hspool_events_in_setup": len(hspool_rows),
+                "hspool_stem_kinds": compact_list(
+                    [
+                        row.get("stem_kind")
+                        for row in hspool_rows
+                        if row.get("stem_kind") not in {None, ""}
+                    ],
+                    max_items=6,
+                ),
+                "hspool_event_counts": compact_list(
+                    [
+                        f"{event}:{count}"
+                        for event, count in sorted(hspool_event_counts.items())
+                    ],
+                    max_items=8,
+                ),
+                "hspool_max_elapsed_ms": row_max(hspool_rows, "elapsed_ms"),
+            }
+        )
+
+    return sorted(
+        rows,
+        key=lambda row: numeric(row.get("gap_ms")) or 0,
+        reverse=True,
+    )
+
+
 def same_circuit_activity_during_stream_gap(
     relay_timings: list[dict[str, object]],
     circ_id: object,
@@ -18857,6 +19151,9 @@ def target_label_matches_hostname(label: object, hostname: object) -> bool:
         return False
     if "\u2026" in label_value:
         prefix, suffix = label_value.split("\u2026", 1)
+        return host_value.startswith(prefix) and host_value.endswith(suffix)
+    if "..." in label_value:
+        prefix, suffix = label_value.split("...", 1)
         return host_value.startswith(prefix) and host_value.endswith(suffix)
     return label_value == host_value
 
@@ -27216,7 +27513,7 @@ def promotion_slow_stream_counts(
     slow_rows: list[dict[str, object]] = []
     slow_same_close_rows: list[dict[str, object]] = []
     slow_unresolved_rows: list[dict[str, object]] = []
-    for current_profile, _profile, _target, _summary, run in iter_runs(payload):
+    for current_profile, _profile, target, _summary, run in iter_runs(payload):
         if current_profile != profile_name:
             continue
         lines = dedupe_lines(run_torfast_lines(run))
@@ -27226,6 +27523,10 @@ def promotion_slow_stream_counts(
             row = dict(item)
             terminal = latest_stream_receiver_terminal(row, lines)
             copy_if_present(row, terminal, "stream_close_cause")
+            if slow_socks_row_is_background_side_request(
+                target, run, row
+            ):
+                continue
             slow_rows.append(row)
             same_close = socks_row_is_same_close_not_connected(row)
             client_reset_close = socks_row_is_client_reset_end_close(
@@ -27288,6 +27589,10 @@ def promotion_unresolved_slow_stream_rows(
             row = dict(item)
             terminal = latest_stream_receiver_terminal(row, lines)
             copy_if_present(row, terminal, "stream_close_cause")
+            if slow_socks_row_is_background_side_request(
+                target, run, row
+            ):
+                continue
             if socks_row_is_resolved_client_close(row, lifecycle_rows):
                 continue
             rows.append(
@@ -27320,6 +27625,38 @@ def promotion_unresolved_slow_stream_rows(
     )
 
 
+def run_target_resource_hostnames(target: object, run: dict[str, object]) -> set[str]:
+    hosts = set()
+    target_host = resource_hostname(target)
+    if target_host:
+        hosts.add(target_host)
+    for resource in browser_resource_rows_for_run(run):
+        resource_host = resource_hostname(resource.get("name"))
+        if resource_host:
+            hosts.add(resource_host)
+    return hosts
+
+
+def slow_socks_row_is_background_side_request(
+    target: object, run: dict[str, object], row: dict[str, object]
+) -> bool:
+    if torfast_slow_reason(row) != "connect>=1s":
+        return False
+    if row.get("relay_ms") is not None:
+        return False
+    if row.get("stream_id") is not None or row.get("circ_id"):
+        return False
+    target_label = row.get("target_label")
+    if not isinstance(target_label, str) or not target_label:
+        return False
+    page_hosts = run_target_resource_hostnames(target, run)
+    if not page_hosts:
+        return False
+    return not any(
+        target_label_matches_hostname(target_label, host) for host in page_hosts
+    )
+
+
 def promotion_resource_queue_regression_rows(
     payload: dict[str, object],
     *,
@@ -27337,10 +27674,19 @@ def promotion_resource_queue_regression_rows(
         queued_1000_delta = numeric(row.get("fetch_to_request_1000_delta")) or 0
         median_delta = numeric(row.get("median_fetch_to_request_delta_ms")) or 0
         max_delta = numeric(row.get("max_fetch_to_request_delta_ms")) or 0
+        queue_shape_better_or_equal = queued_1000_delta <= 0 and median_delta <= 0
+        queue_shape_clearly_better = (
+            queued_1000_delta < 0
+            or median_delta < -PROMOTION_QUEUE_MEDIAN_REGRESSION_MS
+        )
+        max_only_regression = (
+            max_delta > PROMOTION_QUEUE_MAX_REGRESSION_MS
+            and not (queue_shape_better_or_equal and queue_shape_clearly_better)
+        )
         if (
             queued_1000_delta > 0
             or median_delta > PROMOTION_QUEUE_MEDIAN_REGRESSION_MS
-            or max_delta > PROMOTION_QUEUE_MAX_REGRESSION_MS
+            or max_only_regression
         ):
             rows.append(row)
     return rows
@@ -27582,6 +27928,243 @@ def boot_directory_timeline_rows(payload: dict[str, object]) -> list[dict[str, o
         if isinstance(relay_bytes, int):
             row["terminal_summary_relay_mib"] = round(relay_bytes / 1_048_576, 3)
         rows.append(row)
+    return rows
+
+
+def profile_hspool_timing_lines(profile: dict[str, object]) -> list[str]:
+    lines: list[str] = []
+    boot = profile.get("boot", {})
+    if isinstance(boot, dict):
+        for key in ("signal_lines", "lines"):
+            value = boot.get(key, [])
+            if isinstance(value, list):
+                lines.extend(str(line) for line in value)
+    lines.extend(proxy_log_lines(profile))
+    return dedupe_lines(lines)
+
+
+def first_timed_row(rows: list[dict[str, object]]) -> dict[str, object] | None:
+    timed_rows = [
+        row for row in rows if numeric(row.get("timestamp_ms")) is not None
+    ]
+    if timed_rows:
+        return min(timed_rows, key=lambda row: numeric(row.get("timestamp_ms")) or 0)
+    return rows[0] if rows else None
+
+
+def seconds_after_boot(
+    row: dict[str, object] | None, boot_ready_epoch_ms: float | None
+) -> float | None:
+    if row is None or boot_ready_epoch_ms is None:
+        return None
+    timestamp_ms = numeric(row.get("timestamp_ms"))
+    if timestamp_ms is None:
+        return None
+    return round((timestamp_ms - boot_ready_epoch_ms) / 1000.0, 3)
+
+
+def hspool_client_hsdir_timeout_cap_summary(
+    *,
+    first_availability: dict[str, object] | None,
+    first_availability_after_boot_s: float | None,
+    decision_rows: list[dict[str, object]],
+    cap_applied_rows: int,
+    first_enable_after_boot_s: float | None,
+    first_disable_after_boot_s: float | None,
+    enabled_client_hsdir_requests_before_disable: int | None,
+) -> str:
+    if first_availability is None:
+        if first_enable_after_boot_s is not None:
+            return (
+                "enable line says the post-boot-only cap turned on after bootstrap "
+                "before any retained ClientHsDir request"
+            )
+        if enabled_client_hsdir_requests_before_disable == 0:
+            return (
+                "disable line says the startup-only cap turned off before any enabled "
+                "ClientHsDir request was retained"
+            )
+        if first_disable_after_boot_s is not None:
+            return "disable line is retained, but no ClientHsDir availability row is retained"
+        return "no retained ClientHsDir availability row"
+
+    cap_enabled = first_availability.get("cap_enabled")
+    if cap_enabled is False:
+        if first_enable_after_boot_s is not None:
+            return (
+                "enable line is retained, but the first retained ClientHsDir still "
+                "sees the cap off"
+            )
+        if enabled_client_hsdir_requests_before_disable == 0:
+            return (
+                "disable line says the startup-only cap turned off before any enabled "
+                "ClientHsDir request was retained"
+            )
+        if first_disable_after_boot_s is not None:
+            return "disable line is retained and the first retained ClientHsDir already sees the cap off"
+        if first_availability_after_boot_s is not None and first_availability_after_boot_s >= 0:
+            return "first retained ClientHsDir is after proxy ready with the cap already off"
+        if first_availability_after_boot_s is not None:
+            return "first retained ClientHsDir is before proxy ready with the cap already off"
+        return "first retained ClientHsDir already sees the cap off"
+
+    if cap_enabled is True:
+        if first_enable_after_boot_s is not None:
+            if cap_applied_rows:
+                return (
+                    "enable line says the post-boot-only cap turned on after "
+                    "bootstrap and retained ClientHsDir rows still show it on"
+                )
+            if decision_rows:
+                return (
+                    "enable line says the post-boot-only cap turned on after "
+                    "bootstrap, but the cap was not applied"
+                )
+            return (
+                "enable line says the post-boot-only cap turned on after bootstrap "
+                "before retained ClientHsDir rows"
+            )
+        if cap_applied_rows:
+            if first_availability_after_boot_s is not None and first_availability_after_boot_s < 0:
+                return "retained ClientHsDir rows still show the cap on during startup"
+            return "retained ClientHsDir rows still show the cap on after proxy ready"
+        if decision_rows:
+            return "decision rows are retained, but the cap was not applied"
+        return "first retained ClientHsDir still sees the cap on"
+
+    if decision_rows:
+        return "decision rows are retained, but availability state is missing"
+    return "retained proof is incomplete"
+
+
+def hspool_client_hsdir_timeout_cap_rows(
+    payload: dict[str, object]
+) -> list[dict[str, object]]:
+    profiles = payload.get("profiles", {})
+    if not isinstance(profiles, dict):
+        return []
+
+    rows: list[dict[str, object]] = []
+    for profile_name, profile in sorted(profiles.items()):
+        if not isinstance(profile, dict) or profile.get("skipped"):
+            continue
+
+        timings = parse_torfast_hspool_timings(profile_hspool_timing_lines(profile))
+        availability_rows = [
+            row
+            for row in timings
+            if row.get("event") == "client_hsdir_extend_timeout_availability"
+        ]
+        decision_rows = [
+            row
+            for row in timings
+            if row.get("event") == "client_hsdir_extend_timeout_decision"
+        ]
+        enabled_rows = [
+            row
+            for row in timings
+            if row.get("event") == "client_hsdir_extend_timeout_enabled_after_bootstrap"
+        ]
+        disabled_rows = [
+            row
+            for row in timings
+            if row.get("event") == "client_hsdir_extend_timeout_disabled_after_bootstrap"
+        ]
+        if (
+            not availability_rows
+            and not decision_rows
+            and not enabled_rows
+            and not disabled_rows
+        ):
+            continue
+
+        boot = profile.get("boot", {})
+        boot_ready_epoch_ms = (
+            numeric(boot.get("ready_epoch_ms")) if isinstance(boot, dict) else None
+        )
+        first_availability = first_timed_row(availability_rows)
+        first_decision = first_timed_row(decision_rows)
+        first_enabled = first_timed_row(enabled_rows)
+        first_disabled = first_timed_row(disabled_rows)
+        first_client_hsdir = first_timed_row(
+            [
+                row
+                for row in timings
+                if row in availability_rows
+                or row in decision_rows
+                or row.get("kind") == "ClientHsDir"
+            ]
+        )
+        cap_applied_rows = sum(
+            1 for row in decision_rows if row.get("cap_applied") is True
+        )
+        enabled_client_hsdir_requests_before_disable = (
+            int(first_disabled["enabled_client_hsdir_requests"])
+            if first_disabled is not None
+            and first_disabled.get("enabled_client_hsdir_requests") is not None
+            else None
+        )
+        first_availability_after_boot_s = seconds_after_boot(
+            first_availability, boot_ready_epoch_ms
+        )
+        first_enable_after_boot_s = seconds_after_boot(
+            first_enabled, boot_ready_epoch_ms
+        )
+        first_disable_after_boot_s = seconds_after_boot(
+            first_disabled, boot_ready_epoch_ms
+        )
+
+        rows.append(
+            {
+                "profile": profile_name,
+                "startup_only": profile.get(
+                    "arti_hspool_client_hsdir_extend_timeout_cap_startup_only"
+                ),
+                "post_boot_only": profile.get(
+                    "arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only"
+                ),
+                "configured_cap_ms": profile.get(
+                    "arti_hspool_client_hsdir_extend_timeout_cap_ms"
+                ),
+                "boot_seconds": boot_seconds_for_profile(profile),
+                "first_client_hsdir_after_boot_s": seconds_after_boot(
+                    first_client_hsdir, boot_ready_epoch_ms
+                ),
+                "first_availability_after_boot_s": first_availability_after_boot_s,
+                "first_availability_cap_enabled": (
+                    first_availability.get("cap_enabled")
+                    if first_availability is not None
+                    else None
+                ),
+                "first_availability_cap_configured": (
+                    first_availability.get("cap_configured")
+                    if first_availability is not None
+                    else None
+                ),
+                "decision_rows": len(decision_rows),
+                "cap_applied_rows": cap_applied_rows,
+                "first_decision_after_boot_s": seconds_after_boot(
+                    first_decision, boot_ready_epoch_ms
+                ),
+                "first_enable_after_boot_s": first_enable_after_boot_s,
+                "first_disable_after_boot_s": first_disable_after_boot_s,
+                "enabled_client_hsdir_requests_before_disable": (
+                    enabled_client_hsdir_requests_before_disable
+                ),
+                "summary": hspool_client_hsdir_timeout_cap_summary(
+                    first_availability=first_availability,
+                    first_availability_after_boot_s=first_availability_after_boot_s,
+                    decision_rows=decision_rows,
+                    cap_applied_rows=cap_applied_rows,
+                    first_enable_after_boot_s=first_enable_after_boot_s,
+                    first_disable_after_boot_s=first_disable_after_boot_s,
+                    enabled_client_hsdir_requests_before_disable=(
+                        enabled_client_hsdir_requests_before_disable
+                    ),
+                ),
+            }
+        )
+
     return rows
 
 

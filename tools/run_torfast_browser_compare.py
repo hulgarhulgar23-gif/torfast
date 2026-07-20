@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import platform
 import queue
+import re
 import shutil
 import statistics
 import subprocess
@@ -26,6 +27,7 @@ from torfast.browser_startup_seed import DEFAULT_BROWSER_STARTUP_SEED_ROOT
 from torfast.cli import discover_browser_bin, discover_tor_bin
 from torfast.control import wait_for_general_circuits
 from torfast.dir_cache_seed import (
+    DEFAULT_C_TOR_DIR_CACHE_SEED_ROOT,
     apply_seed_to_data_dir,
     describe_seed,
     update_seed_from_data_dir,
@@ -67,6 +69,19 @@ COLD_PROFILE = "local_c_tor_browser_cold"
 SEEDED_PROFILE = "local_c_tor_browser_seeded"
 SEEDED_CIRCUIT_READY_PROFILE = "local_c_tor_browser_seeded_general_circuit"
 PROXY_LOG_TAIL_LINES = 200
+PROFILE_ALIASES = {
+    "bundled": BUNDLED_PROFILE,
+    "bundled-seeded": BUNDLED_SEEDED_PROFILE,
+    "bundled_seeded": BUNDLED_SEEDED_PROFILE,
+    "cold": COLD_PROFILE,
+    "local-cold": COLD_PROFILE,
+    "local_cold": COLD_PROFILE,
+    "seeded": SEEDED_PROFILE,
+    "local-seeded": SEEDED_PROFILE,
+    "local_seeded": SEEDED_PROFILE,
+    "seeded-general-circuit": SEEDED_CIRCUIT_READY_PROFILE,
+    "seeded_general_circuit": SEEDED_CIRCUIT_READY_PROFILE,
+}
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -105,6 +120,34 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--extra-bundled-seeded-browser-block-url-substring",
+        action="append",
+        default=[],
+        metavar="SUBSTRING",
+        help=(
+            "add a bundled-seeded lab-only profile that blocks browser HTTP(S) "
+            "requests whose URL contains this substring"
+        ),
+    )
+    parser.add_argument(
+        "--extra-bundled-seeded-browser-max-persistent-connections-per-server",
+        action="append",
+        default=[],
+        metavar="COUNT",
+        help=(
+            "add a bundled-seeded lab-only profile that overrides "
+            "network.http.max-persistent-connections-per-server to this value"
+        ),
+    )
+    parser.add_argument(
+        "--extra-bundled-seeded-browser-serial-http-connections",
+        action="store_true",
+        help=(
+            "add a bundled-seeded lab-only profile that forces serial browser "
+            "HTTP connection concurrency"
+        ),
+    )
+    parser.add_argument(
         "--extra-seeded-general-circuit-ready",
         action="store_true",
         help=(
@@ -136,6 +179,32 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--post-boot-wait", type=float, default=0.0)
     parser.add_argument("--output-root", default="results")
     parser.add_argument("--compact-output", action="store_true")
+    parser.add_argument(
+        "--dir-cache-seed-root",
+        default=str(DEFAULT_C_TOR_DIR_CACHE_SEED_ROOT),
+        help=(
+            "shared cache-only seed root used by seeded profiles when "
+            "reusing an existing seed instead of refreshing one per run"
+        ),
+    )
+    parser.add_argument(
+        "--reuse-dir-cache-seed",
+        action="store_true",
+        help=(
+            "reuse the shared cache-only seed for seeded profiles instead of "
+            "bootstrapping a fresh seed-refresh Tor each run"
+        ),
+    )
+    parser.add_argument(
+        "--profiles",
+        nargs="+",
+        metavar="PROFILE",
+        help=(
+            "run only the selected profiles; accepts exact profile names, "
+            "comma-separated lists, and aliases like bundled, bundled-seeded, "
+            "cold, seeded, and seeded-general-circuit"
+        ),
+    )
     parser.add_argument(
         "--browser-startup-seed-root",
         default=str(DEFAULT_BROWSER_STARTUP_SEED_ROOT),
@@ -244,9 +313,39 @@ def main(argv: list[str] | None = None) -> int:
     extra_bundled_seeded_conflux_ux = parse_extra_conflux_ux_values(
         args.extra_bundled_seeded_conflux_ux
     )
+    extra_bundled_seeded_browser_block_url_substrings = (
+        parse_extra_browser_block_url_substrings(
+            args.extra_bundled_seeded_browser_block_url_substring
+        )
+    )
+    extra_bundled_seeded_browser_max_persistent_connections_per_server = (
+        parse_extra_browser_connection_cap_values(
+            args.extra_bundled_seeded_browser_max_persistent_connections_per_server
+        )
+    )
     extra_bundled_seeded_min_general_circuits = parse_min_general_circuit_counts(
         args.extra_bundled_seeded_min_general_circuits
     )
+    if (
+        args.browser_serial_http_connections
+        and extra_bundled_seeded_browser_max_persistent_connections_per_server
+    ):
+        print(
+            "--extra-bundled-seeded-browser-max-persistent-connections-per-server "
+            "cannot be combined with --browser-serial-http-connections",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.browser_max_persistent_connections_per_server is not None
+        and args.extra_bundled_seeded_browser_serial_http_connections
+    ):
+        print(
+            "--extra-bundled-seeded-browser-serial-http-connections cannot be "
+            "combined with --browser-max-persistent-connections-per-server",
+            file=sys.stderr,
+        )
+        return 2
     targets = resolve_targets(args.target_pack, args.targets)
     if not targets:
         print("at least one target is required", file=sys.stderr)
@@ -275,6 +374,8 @@ def main(argv: list[str] | None = None) -> int:
 
     browser_bin = Path(str(browser["path"])).resolve()
     tor_bin = Path(str(tor["path"])).resolve()
+    dir_cache_seed_root = Path(args.dir_cache_seed_root).resolve()
+    browser_startup_seed_root = Path(args.browser_startup_seed_root).resolve()
     bundled_tor = discover_bundled_tor_bin(browser_bin, args.bundled_tor_bin)
     bundled_tor_bin = Path(str(bundled_tor["path"])).resolve()
     include_bundled_tor = (
@@ -291,6 +392,26 @@ def main(argv: list[str] | None = None) -> int:
     ]
     if include_bundled_tor:
         profile_order_base.extend(bundled_seeded_conflux_profiles)
+    bundled_seeded_block_profiles = [
+        bundled_seeded_block_profile_name(substring)
+        for substring in extra_bundled_seeded_browser_block_url_substrings
+    ]
+    if include_bundled_tor:
+        profile_order_base.extend(bundled_seeded_block_profiles)
+    bundled_seeded_maxconn_profiles = [
+        bundled_seeded_maxconn_profile_name(count)
+        for count in extra_bundled_seeded_browser_max_persistent_connections_per_server
+    ]
+    if include_bundled_tor:
+        profile_order_base.extend(bundled_seeded_maxconn_profiles)
+    bundled_seeded_serial_profile = (
+        bundled_seeded_serial_http_profile_name()
+        if include_bundled_tor
+        and args.extra_bundled_seeded_browser_serial_http_connections
+        else None
+    )
+    if bundled_seeded_serial_profile is not None:
+        profile_order_base.append(bundled_seeded_serial_profile)
     bundled_seeded_general_circuit_profiles = [
         bundled_seeded_general_circuits_profile_name(count)
         for count in extra_bundled_seeded_min_general_circuits
@@ -304,6 +425,16 @@ def main(argv: list[str] | None = None) -> int:
         for seconds in extra_seeded_post_boot_wait_seconds
     ]
     profile_order_base.extend(seeded_wait_profiles)
+    available_profile_order_base = list(profile_order_base)
+    try:
+        profile_order_base = resolve_selected_profiles(
+            available_profile_order_base,
+            args.profiles,
+        )
+    except ValueError as exc:
+        print(f"--profiles {exc}", file=sys.stderr)
+        return 2
+    selected_profiles = set(profile_order_base)
 
     default_prefs = read_browser_default_prefs(browser_bin)
     payload: dict[str, object] = {
@@ -333,13 +464,28 @@ def main(argv: list[str] | None = None) -> int:
         },
         "browser_startup_seed": {
             "enabled": not args.no_browser_startup_seed,
-            "seed_root": str(Path(args.browser_startup_seed_root).resolve()),
+            "seed_root": str(browser_startup_seed_root),
+        },
+        "dir_cache_seed": {
+            "reuse_existing": args.reuse_dir_cache_seed,
+            "seed_root": str(dir_cache_seed_root),
         },
         "cycle_order_strategy": "cyclic rotation over base profile order",
+        "available_profile_order_base": available_profile_order_base,
         "profile_order_base": profile_order_base,
+        "requested_profiles": args.profiles,
         "skip_bundled_tor": args.skip_bundled_tor,
         "extra_bundled_seeded": args.extra_bundled_seeded,
         "extra_bundled_seeded_conflux_ux": extra_bundled_seeded_conflux_ux,
+        "extra_bundled_seeded_browser_block_url_substrings": (
+            extra_bundled_seeded_browser_block_url_substrings
+        ),
+        "extra_bundled_seeded_browser_max_persistent_connections_per_server": (
+            extra_bundled_seeded_browser_max_persistent_connections_per_server
+        ),
+        "extra_bundled_seeded_browser_serial_http_connections": (
+            args.extra_bundled_seeded_browser_serial_http_connections
+        ),
         "extra_bundled_seeded_min_general_circuits": (
             extra_bundled_seeded_min_general_circuits
         ),
@@ -371,36 +517,34 @@ def main(argv: list[str] | None = None) -> int:
             ),
         },
         "profiles": {
-            COLD_PROFILE: {"runs": []},
-            SEEDED_PROFILE: {"runs": []},
-            BUNDLED_SEEDED_PROFILE: (
-                {"runs": []}
-                if include_bundled_tor and args.extra_bundled_seeded
-                else {
-                    "skipped": True,
-                    "reason": (
-                        "disabled by default"
-                        if include_bundled_tor
-                        else f"bundled tor not found: {bundled_tor_bin}"
-                    ),
-                }
+            COLD_PROFILE: configure_profile_entry(
+                selected=COLD_PROFILE in selected_profiles,
             ),
-            SEEDED_CIRCUIT_READY_PROFILE: (
-                {"runs": []}
-                if args.extra_seeded_general_circuit_ready
-                else {"skipped": True, "reason": "disabled by default"}
+            SEEDED_PROFILE: configure_profile_entry(
+                selected=SEEDED_PROFILE in selected_profiles,
             ),
-            BUNDLED_PROFILE: (
-                {"runs": []}
-                if include_bundled_tor
-                else {
-                    "skipped": True,
-                    "reason": (
-                        "disabled by --skip-bundled-tor"
-                        if args.skip_bundled_tor
-                        else f"bundled tor not found: {bundled_tor_bin}"
-                    ),
-                }
+            BUNDLED_SEEDED_PROFILE: configure_profile_entry(
+                selected=BUNDLED_SEEDED_PROFILE in selected_profiles,
+                enabled=include_bundled_tor and args.extra_bundled_seeded,
+                skip_reason=(
+                    "disabled by default"
+                    if include_bundled_tor
+                    else f"bundled tor not found: {bundled_tor_bin}"
+                ),
+            ),
+            SEEDED_CIRCUIT_READY_PROFILE: configure_profile_entry(
+                selected=SEEDED_CIRCUIT_READY_PROFILE in selected_profiles,
+                enabled=args.extra_seeded_general_circuit_ready,
+                skip_reason="disabled by default",
+            ),
+            BUNDLED_PROFILE: configure_profile_entry(
+                selected=BUNDLED_PROFILE in selected_profiles,
+                enabled=include_bundled_tor,
+                skip_reason=(
+                    "disabled by --skip-bundled-tor"
+                    if args.skip_bundled_tor
+                    else f"bundled tor not found: {bundled_tor_bin}"
+                ),
             ),
         },
     }
@@ -411,10 +555,16 @@ def main(argv: list[str] | None = None) -> int:
     ):
         profiles_payload = payload["profiles"]
         assert isinstance(profiles_payload, dict)
-        profiles_payload[profile_name] = {
-            "runs": [],
-            "min_general_circuit_count": count,
-        }
+        profiles_payload[profile_name] = configure_profile_entry(
+            selected=profile_name in selected_profiles,
+            enabled=include_bundled_tor,
+            skip_reason=(
+                "disabled by --skip-bundled-tor"
+                if args.skip_bundled_tor
+                else f"bundled tor not found: {bundled_tor_bin}"
+            ),
+            min_general_circuit_count=count,
+        )
     for ux, profile_name in zip(
         extra_bundled_seeded_conflux_ux,
         bundled_seeded_conflux_profiles,
@@ -422,10 +572,63 @@ def main(argv: list[str] | None = None) -> int:
     ):
         profiles_payload = payload["profiles"]
         assert isinstance(profiles_payload, dict)
-        profiles_payload[profile_name] = {
-            "runs": [],
-            "conflux_client_ux": ux,
-        }
+        profiles_payload[profile_name] = configure_profile_entry(
+            selected=profile_name in selected_profiles,
+            enabled=include_bundled_tor,
+            skip_reason=(
+                "disabled by --skip-bundled-tor"
+                if args.skip_bundled_tor
+                else f"bundled tor not found: {bundled_tor_bin}"
+            ),
+            conflux_client_ux=ux,
+        )
+    for substring, profile_name in zip(
+        extra_bundled_seeded_browser_block_url_substrings,
+        bundled_seeded_block_profiles,
+        strict=True,
+    ):
+        profiles_payload = payload["profiles"]
+        assert isinstance(profiles_payload, dict)
+        profiles_payload[profile_name] = configure_profile_entry(
+            selected=profile_name in selected_profiles,
+            enabled=include_bundled_tor,
+            skip_reason=(
+                "disabled by --skip-bundled-tor"
+                if args.skip_bundled_tor
+                else f"bundled tor not found: {bundled_tor_bin}"
+            ),
+            browser_block_url_substrings=[substring],
+        )
+    for count, profile_name in zip(
+        extra_bundled_seeded_browser_max_persistent_connections_per_server,
+        bundled_seeded_maxconn_profiles,
+        strict=True,
+    ):
+        profiles_payload = payload["profiles"]
+        assert isinstance(profiles_payload, dict)
+        profiles_payload[profile_name] = configure_profile_entry(
+            selected=profile_name in selected_profiles,
+            enabled=include_bundled_tor,
+            skip_reason=(
+                "disabled by --skip-bundled-tor"
+                if args.skip_bundled_tor
+                else f"bundled tor not found: {bundled_tor_bin}"
+            ),
+            browser_max_persistent_connections_per_server=count,
+        )
+    if bundled_seeded_serial_profile is not None:
+        profiles_payload = payload["profiles"]
+        assert isinstance(profiles_payload, dict)
+        profiles_payload[bundled_seeded_serial_profile] = configure_profile_entry(
+            selected=bundled_seeded_serial_profile in selected_profiles,
+            enabled=include_bundled_tor,
+            skip_reason=(
+                "disabled by --skip-bundled-tor"
+                if args.skip_bundled_tor
+                else f"bundled tor not found: {bundled_tor_bin}"
+            ),
+            browser_serial_http_connections=True,
+        )
     for seconds, profile_name in zip(
         extra_seeded_post_boot_wait_seconds,
         seeded_wait_profiles,
@@ -433,19 +636,22 @@ def main(argv: list[str] | None = None) -> int:
     ):
         profiles_payload = payload["profiles"]
         assert isinstance(profiles_payload, dict)
-        profiles_payload[profile_name] = {
-            "runs": [],
-            "extra_post_boot_wait_seconds": seconds,
-        }
+        profiles_payload[profile_name] = configure_profile_entry(
+            selected=profile_name in selected_profiles,
+            extra_post_boot_wait_seconds=seconds,
+        )
 
     profiles = payload["profiles"]
     assert isinstance(profiles, dict)
-    cold_runs = profiles[COLD_PROFILE]["runs"]
-    seeded_runs = profiles[SEEDED_PROFILE]["runs"]
+    cold_runs = profiles[COLD_PROFILE].get("runs", [])
+    seeded_runs = profiles[SEEDED_PROFILE].get("runs", [])
     bundled_seeded_profile = profiles[BUNDLED_SEEDED_PROFILE]
     assert isinstance(bundled_seeded_profile, dict)
     bundled_seeded_runs = bundled_seeded_profile.get("runs", [])
     bundled_seeded_conflux_runs_by_profile: dict[str, list[dict[str, object]]] = {}
+    bundled_seeded_block_runs_by_profile: dict[str, list[dict[str, object]]] = {}
+    bundled_seeded_maxconn_runs_by_profile: dict[str, list[dict[str, object]]] = {}
+    bundled_seeded_serial_runs: list[dict[str, object]] | None = None
     bundled_seeded_general_runs_by_profile: dict[str, list[dict[str, object]]] = {}
     seeded_circuit_ready_profile = profiles[SEEDED_CIRCUIT_READY_PROFILE]
     assert isinstance(seeded_circuit_ready_profile, dict)
@@ -461,6 +667,24 @@ def main(argv: list[str] | None = None) -> int:
         runs_payload = bundled_seeded_conflux_profile.get("runs", [])
         assert isinstance(runs_payload, list)
         bundled_seeded_conflux_runs_by_profile[profile_name] = runs_payload
+    for profile_name in bundled_seeded_block_profiles:
+        bundled_seeded_block_profile = profiles[profile_name]
+        assert isinstance(bundled_seeded_block_profile, dict)
+        runs_payload = bundled_seeded_block_profile.get("runs", [])
+        assert isinstance(runs_payload, list)
+        bundled_seeded_block_runs_by_profile[profile_name] = runs_payload
+    for profile_name in bundled_seeded_maxconn_profiles:
+        bundled_seeded_maxconn_profile = profiles[profile_name]
+        assert isinstance(bundled_seeded_maxconn_profile, dict)
+        runs_payload = bundled_seeded_maxconn_profile.get("runs", [])
+        assert isinstance(runs_payload, list)
+        bundled_seeded_maxconn_runs_by_profile[profile_name] = runs_payload
+    if bundled_seeded_serial_profile is not None:
+        bundled_seeded_serial_payload = profiles[bundled_seeded_serial_profile]
+        assert isinstance(bundled_seeded_serial_payload, dict)
+        runs_payload = bundled_seeded_serial_payload.get("runs", [])
+        assert isinstance(runs_payload, list)
+        bundled_seeded_serial_runs = runs_payload
     for profile_name in seeded_wait_profiles:
         seeded_wait_profile = profiles[profile_name]
         assert isinstance(seeded_wait_profile, dict)
@@ -507,9 +731,7 @@ def main(argv: list[str] | None = None) -> int:
                             args.browser_max_persistent_connections_per_server
                         ),
                         browser_block_url_substrings=browser_block_url_substrings,
-                        browser_startup_seed_root=Path(
-                            args.browser_startup_seed_root
-                        ).resolve(),
+                        browser_startup_seed_root=browser_startup_seed_root,
                         no_browser_startup_seed=args.no_browser_startup_seed,
                     )
                 )
@@ -535,9 +757,9 @@ def main(argv: list[str] | None = None) -> int:
                             args.browser_max_persistent_connections_per_server
                         ),
                         browser_block_url_substrings=browser_block_url_substrings,
-                        browser_startup_seed_root=Path(
-                            args.browser_startup_seed_root
-                        ).resolve(),
+                        dir_cache_seed_root=dir_cache_seed_root,
+                        reuse_dir_cache_seed=args.reuse_dir_cache_seed,
+                        browser_startup_seed_root=browser_startup_seed_root,
                         no_browser_startup_seed=args.no_browser_startup_seed,
                     )
                 )
@@ -563,13 +785,110 @@ def main(argv: list[str] | None = None) -> int:
                             args.browser_max_persistent_connections_per_server
                         ),
                         browser_block_url_substrings=browser_block_url_substrings,
-                        browser_startup_seed_root=Path(
-                            args.browser_startup_seed_root
-                        ).resolve(),
+                        dir_cache_seed_root=dir_cache_seed_root,
+                        reuse_dir_cache_seed=args.reuse_dir_cache_seed,
+                        browser_startup_seed_root=browser_startup_seed_root,
                         no_browser_startup_seed=args.no_browser_startup_seed,
                         conflux_client_ux=profile_bundled_seeded_conflux_ux(
                             profile_name
                         ),
+                    )
+                )
+            elif profile_name in bundled_seeded_block_runs_by_profile:
+                bundled_seeded_block_runs_by_profile[profile_name].append(
+                    run_seeded_profile(
+                        profile_name=profile_name,
+                        run_index=run_index,
+                        output_dir=output_dir,
+                        browser_bin=browser_bin,
+                        tor_bin=bundled_tor_bin,
+                        port=ports[profile_name],
+                        targets=targets,
+                        timeout=args.timeout,
+                        window_size=args.window_size,
+                        post_boot_wait=args.post_boot_wait,
+                        compact_output=args.compact_output,
+                        browser_net_log=args.browser_net_log,
+                        browser_serial_http_connections=(
+                            args.browser_serial_http_connections
+                        ),
+                        browser_max_persistent_connections_per_server=(
+                            args.browser_max_persistent_connections_per_server
+                        ),
+                        browser_block_url_substrings=(
+                            normalize_browser_block_url_substrings(
+                                [
+                                    *browser_block_url_substrings,
+                                    *bundled_seeded_block_url_substrings_for_profile(
+                                        profile_name,
+                                        bundled_seeded_block_profiles,
+                                        extra_bundled_seeded_browser_block_url_substrings,
+                                    ),
+                                ]
+                            )
+                        ),
+                        dir_cache_seed_root=dir_cache_seed_root,
+                        reuse_dir_cache_seed=args.reuse_dir_cache_seed,
+                        browser_startup_seed_root=browser_startup_seed_root,
+                        no_browser_startup_seed=args.no_browser_startup_seed,
+                    )
+                )
+            elif profile_name in bundled_seeded_maxconn_runs_by_profile:
+                bundled_seeded_maxconn_runs_by_profile[profile_name].append(
+                    run_seeded_profile(
+                        profile_name=profile_name,
+                        run_index=run_index,
+                        output_dir=output_dir,
+                        browser_bin=browser_bin,
+                        tor_bin=bundled_tor_bin,
+                        port=ports[profile_name],
+                        targets=targets,
+                        timeout=args.timeout,
+                        window_size=args.window_size,
+                        post_boot_wait=args.post_boot_wait,
+                        compact_output=args.compact_output,
+                        browser_net_log=args.browser_net_log,
+                        browser_serial_http_connections=False,
+                        browser_max_persistent_connections_per_server=(
+                            profile_bundled_seeded_maxconn(
+                                profile_name,
+                                bundled_seeded_maxconn_profiles,
+                                extra_bundled_seeded_browser_max_persistent_connections_per_server,
+                            )
+                        ),
+                        browser_block_url_substrings=browser_block_url_substrings,
+                        dir_cache_seed_root=dir_cache_seed_root,
+                        reuse_dir_cache_seed=args.reuse_dir_cache_seed,
+                        browser_startup_seed_root=browser_startup_seed_root,
+                        no_browser_startup_seed=args.no_browser_startup_seed,
+                    )
+                )
+            elif (
+                bundled_seeded_serial_profile is not None
+                and profile_name == bundled_seeded_serial_profile
+                and bundled_seeded_serial_runs is not None
+            ):
+                bundled_seeded_serial_runs.append(
+                    run_seeded_profile(
+                        profile_name=profile_name,
+                        run_index=run_index,
+                        output_dir=output_dir,
+                        browser_bin=browser_bin,
+                        tor_bin=bundled_tor_bin,
+                        port=ports[profile_name],
+                        targets=targets,
+                        timeout=args.timeout,
+                        window_size=args.window_size,
+                        post_boot_wait=args.post_boot_wait,
+                        compact_output=args.compact_output,
+                        browser_net_log=args.browser_net_log,
+                        browser_serial_http_connections=True,
+                        browser_max_persistent_connections_per_server=None,
+                        browser_block_url_substrings=browser_block_url_substrings,
+                        dir_cache_seed_root=dir_cache_seed_root,
+                        reuse_dir_cache_seed=args.reuse_dir_cache_seed,
+                        browser_startup_seed_root=browser_startup_seed_root,
+                        no_browser_startup_seed=args.no_browser_startup_seed,
                     )
                 )
             elif profile_name in bundled_seeded_general_runs_by_profile:
@@ -594,9 +913,9 @@ def main(argv: list[str] | None = None) -> int:
                             args.browser_max_persistent_connections_per_server
                         ),
                         browser_block_url_substrings=browser_block_url_substrings,
-                        browser_startup_seed_root=Path(
-                            args.browser_startup_seed_root
-                        ).resolve(),
+                        dir_cache_seed_root=dir_cache_seed_root,
+                        reuse_dir_cache_seed=args.reuse_dir_cache_seed,
+                        browser_startup_seed_root=browser_startup_seed_root,
                         no_browser_startup_seed=args.no_browser_startup_seed,
                         min_general_circuit_count=profile_min_general_circuit_count(
                             profile_name
@@ -625,9 +944,9 @@ def main(argv: list[str] | None = None) -> int:
                             args.browser_max_persistent_connections_per_server
                         ),
                         browser_block_url_substrings=browser_block_url_substrings,
-                        browser_startup_seed_root=Path(
-                            args.browser_startup_seed_root
-                        ).resolve(),
+                        dir_cache_seed_root=dir_cache_seed_root,
+                        reuse_dir_cache_seed=args.reuse_dir_cache_seed,
+                        browser_startup_seed_root=browser_startup_seed_root,
                         no_browser_startup_seed=args.no_browser_startup_seed,
                         wait_for_general_circuit_ready=True,
                     )
@@ -654,9 +973,7 @@ def main(argv: list[str] | None = None) -> int:
                             args.browser_max_persistent_connections_per_server
                         ),
                         browser_block_url_substrings=browser_block_url_substrings,
-                        browser_startup_seed_root=Path(
-                            args.browser_startup_seed_root
-                        ).resolve(),
+                        browser_startup_seed_root=browser_startup_seed_root,
                         no_browser_startup_seed=args.no_browser_startup_seed,
                     )
                 )
@@ -682,13 +999,13 @@ def main(argv: list[str] | None = None) -> int:
                             args.browser_max_persistent_connections_per_server
                         ),
                         browser_block_url_substrings=browser_block_url_substrings,
-                        browser_startup_seed_root=Path(
-                            args.browser_startup_seed_root
-                        ).resolve(),
+                        dir_cache_seed_root=dir_cache_seed_root,
+                        reuse_dir_cache_seed=args.reuse_dir_cache_seed,
+                        browser_startup_seed_root=browser_startup_seed_root,
                         no_browser_startup_seed=args.no_browser_startup_seed,
                     )
                 )
-            else:
+            elif profile_name == SEEDED_PROFILE:
                 seeded_runs.append(
                     run_seeded_profile(
                         run_index=run_index,
@@ -709,17 +1026,25 @@ def main(argv: list[str] | None = None) -> int:
                             args.browser_max_persistent_connections_per_server
                         ),
                         browser_block_url_substrings=browser_block_url_substrings,
-                        browser_startup_seed_root=Path(
-                            args.browser_startup_seed_root
-                        ).resolve(),
+                        dir_cache_seed_root=dir_cache_seed_root,
+                        reuse_dir_cache_seed=args.reuse_dir_cache_seed,
+                        browser_startup_seed_root=browser_startup_seed_root,
                         no_browser_startup_seed=args.no_browser_startup_seed,
                     )
                 )
+            else:
+                raise AssertionError(f"unexpected profile name: {profile_name}")
 
     add_profile_summary(bundled_profile, targets)
     add_profile_summary(profiles[BUNDLED_SEEDED_PROFILE], targets)
     for profile_name in bundled_seeded_conflux_profiles:
         add_profile_summary(profiles[profile_name], targets)
+    for profile_name in bundled_seeded_block_profiles:
+        add_profile_summary(profiles[profile_name], targets)
+    for profile_name in bundled_seeded_maxconn_profiles:
+        add_profile_summary(profiles[profile_name], targets)
+    if bundled_seeded_serial_profile is not None:
+        add_profile_summary(profiles[bundled_seeded_serial_profile], targets)
     for profile_name in bundled_seeded_general_circuit_profiles:
         add_profile_summary(profiles[profile_name], targets)
     add_profile_summary(profiles[COLD_PROFILE], targets)
@@ -755,6 +1080,57 @@ def resolve_targets(target_pack: str, explicit_targets: list[str] | None) -> lis
     return list(TARGET_PACKS[target_pack])
 
 
+def resolve_selected_profiles(
+    available_profiles: list[str],
+    requested_profiles: list[str] | None,
+) -> list[str]:
+    if not requested_profiles:
+        return list(available_profiles)
+    available_set = set(available_profiles)
+    selected: set[str] = set()
+    unknown: list[str] = []
+    for raw_value in requested_profiles:
+        for token in raw_value.split(","):
+            normalized = token.strip()
+            if not normalized:
+                continue
+            profile_name = PROFILE_ALIASES.get(normalized, normalized)
+            if profile_name not in available_set:
+                unknown.append(normalized)
+                continue
+            selected.add(profile_name)
+    if unknown:
+        available = ", ".join(available_profiles)
+        invalid = ", ".join(unknown)
+        raise ValueError(
+            f"unknown profile(s): {invalid}; available profiles: {available}"
+        )
+    resolved = [name for name in available_profiles if name in selected]
+    if not resolved:
+        raise ValueError("must select at least one profile")
+    return resolved
+
+
+def configure_profile_entry(
+    *,
+    selected: bool,
+    enabled: bool = True,
+    skip_reason: str | None = None,
+    **metadata: object,
+) -> dict[str, object]:
+    entry: dict[str, object] = dict(metadata)
+    if not selected:
+        entry["skipped"] = True
+        entry["reason"] = "excluded by --profiles"
+        return entry
+    if enabled:
+        entry["runs"] = []
+        return entry
+    entry["skipped"] = True
+    entry["reason"] = skip_reason or "disabled"
+    return entry
+
+
 def parse_extra_wait_values(values: list[str]) -> list[float]:
     parsed: list[float] = []
     seen: set[float] = set()
@@ -785,6 +1161,33 @@ def parse_extra_conflux_ux_values(values: list[str]) -> list[str]:
             continue
         seen.add(value)
         parsed.append(value)
+    return parsed
+
+
+def parse_extra_browser_block_url_substrings(values: list[str]) -> list[str]:
+    return normalize_browser_block_url_substrings(values)
+
+
+def parse_extra_browser_connection_cap_values(values: list[str]) -> list[int]:
+    parsed: list[int] = []
+    seen: set[int] = set()
+    for raw in values:
+        try:
+            count = int(raw)
+        except ValueError:
+            raise SystemExit(
+                "--extra-bundled-seeded-browser-max-persistent-connections-per-server "
+                f"must be an integer, got: {raw}"
+            ) from None
+        if not (1 <= count <= 32):
+            raise SystemExit(
+                "--extra-bundled-seeded-browser-max-persistent-connections-per-server "
+                "must be between 1 and 32"
+            )
+        if count in seen:
+            continue
+        seen.add(count)
+        parsed.append(count)
     return parsed
 
 
@@ -832,12 +1235,51 @@ def bundled_seeded_conflux_ux_profile_name(conflux_client_ux: str) -> str:
     return f"{BUNDLED_SEEDED_PROFILE}_confluxux_{conflux_client_ux}"
 
 
+def slugify_profile_token(raw: str, *, fallback: str = "value") -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", raw.lower()).strip("-")
+    return slug[:48] or fallback
+
+
+def bundled_seeded_block_profile_name(url_substring: str) -> str:
+    return f"{BUNDLED_SEEDED_PROFILE}_block_{slugify_profile_token(url_substring)}"
+
+
+def bundled_seeded_maxconn_profile_name(count: int) -> str:
+    return f"{BUNDLED_SEEDED_PROFILE}_maxconn_{count}"
+
+
+def bundled_seeded_serial_http_profile_name() -> str:
+    return f"{BUNDLED_SEEDED_PROFILE}_serialhttp"
+
+
 def profile_bundled_seeded_conflux_ux(profile_name: str) -> str | None:
     prefix = f"{BUNDLED_SEEDED_PROFILE}_confluxux_"
     if not profile_name.startswith(prefix):
         return None
     raw = profile_name.removeprefix(prefix)
     return raw or None
+
+
+def bundled_seeded_block_url_substrings_for_profile(
+    profile_name: str,
+    profile_names: list[str],
+    url_substrings: list[str],
+) -> list[str]:
+    for candidate_name, substring in zip(profile_names, url_substrings, strict=True):
+        if candidate_name == profile_name:
+            return [substring]
+    return []
+
+
+def profile_bundled_seeded_maxconn(
+    profile_name: str,
+    profile_names: list[str],
+    counts: list[int],
+) -> int | None:
+    for candidate_name, count in zip(profile_names, counts, strict=True):
+        if candidate_name == profile_name:
+            return count
+    return None
 
 
 def profile_min_general_circuit_count(profile_name: str) -> int | None:
@@ -928,6 +1370,8 @@ def run_seeded_profile(
     browser_serial_http_connections: bool = False,
     browser_max_persistent_connections_per_server: int | None = None,
     browser_block_url_substrings: list[str] | None = None,
+    dir_cache_seed_root: Path = DEFAULT_C_TOR_DIR_CACHE_SEED_ROOT,
+    reuse_dir_cache_seed: bool = False,
     browser_startup_seed_root: Path = DEFAULT_BROWSER_STARTUP_SEED_ROOT,
     no_browser_startup_seed: bool = False,
     wait_for_general_circuit_ready: bool = False,
@@ -936,32 +1380,35 @@ def run_seeded_profile(
 ) -> dict[str, object]:
     run_dir = output_dir / profile_name / f"run-{run_index}"
     cleanup_path(run_dir)
-    seed_root = run_dir / "dir-cache-seed"
-    prime_result = prime_seed_cache(
-        run_index=run_index,
-        run_dir=run_dir / "seed-refresh",
-        tor_bin=tor_bin,
-        port=port,
-        seed_root=seed_root,
-        compact_output=compact_output,
-        conflux_client_ux=conflux_client_ux,
+    seed_root = (
+        dir_cache_seed_root.resolve()
+        if reuse_dir_cache_seed
+        else run_dir / "dir-cache-seed"
     )
+    if reuse_dir_cache_seed:
+        prime_result = reuse_seed_cache(seed_root)
+    else:
+        prime_result = prime_seed_cache(
+            run_index=run_index,
+            run_dir=run_dir / "seed-refresh",
+            tor_bin=tor_bin,
+            port=port,
+            seed_root=seed_root,
+            compact_output=compact_output,
+            conflux_client_ux=conflux_client_ux,
+        )
     result: dict[str, object] = {
         "profile": profile_name,
         "run_index": run_index,
         "port": port,
         "seed_root": str(seed_root),
         "seed_prime": prime_result,
+        "reuse_dir_cache_seed": reuse_dir_cache_seed,
         "wait_for_general_circuit_ready": wait_for_general_circuit_ready,
         "min_general_circuit_count": min_general_circuit_count,
         "conflux_client_ux": conflux_client_ux,
     }
-    seed_update = prime_result.get("seed_update")
-    if (
-        not isinstance(seed_update, dict)
-        or not seed_update.get("ok")
-        or not seed_update.get("updated")
-    ):
+    if not seed_prime_ok(prime_result):
         result["skipped"] = True
         result["skip_reason"] = "seed prime failed"
         result["seed_description"] = describe_seed(seed_root)
@@ -1070,6 +1517,21 @@ def prime_seed_cache(
     if compact_output:
         result["proxy_artifacts"] = cleanup_named_paths({"data_dir": data_dir})
     return result
+
+
+def reuse_seed_cache(seed_root: Path) -> dict[str, object]:
+    seed_description = describe_seed(seed_root)
+    return {
+        "ok": bool(seed_description.get("present")),
+        "reason": (
+            "reused shared dir-cache seed"
+            if seed_description.get("present")
+            else "shared dir-cache seed missing"
+        ),
+        "reused": True,
+        "seed_root": str(seed_root),
+        "seed_description": seed_description,
+    }
 
 
 def run_measured_c_tor_browser(
@@ -1253,6 +1715,22 @@ def all_benchmarks_ok(benchmarks: object) -> bool:
     return True
 
 
+def seed_prime_ok(seed_prime: object) -> bool:
+    if not isinstance(seed_prime, dict):
+        return False
+    if seed_prime.get("reused"):
+        return bool(seed_prime.get("ok"))
+    seed_prime_boot = seed_prime.get("boot")
+    seed_update = seed_prime.get("seed_update")
+    return (
+        isinstance(seed_prime_boot, dict)
+        and seed_prime_boot.get("ok")
+        and isinstance(seed_update, dict)
+        and seed_update.get("ok")
+        and seed_update.get("updated")
+    )
+
+
 def profile_run_ok(run: dict[str, object]) -> bool:
     if run.get("skipped"):
         return False
@@ -1268,17 +1746,9 @@ def profile_run_ok(run: dict[str, object]) -> bool:
     if not is_seeded_profile_name(profile_name):
         return True
     seed_prime = run.get("seed_prime")
-    if not isinstance(seed_prime, dict):
-        return False
-    seed_prime_boot = seed_prime.get("boot")
-    seed_update = seed_prime.get("seed_update")
     seed_apply = run.get("seed_apply")
     return (
-        isinstance(seed_prime_boot, dict)
-        and seed_prime_boot.get("ok")
-        and isinstance(seed_update, dict)
-        and seed_update.get("ok")
-        and seed_update.get("updated")
+        seed_prime_ok(seed_prime)
         and isinstance(seed_apply, dict)
         and seed_apply.get("ok")
         and seed_apply.get("applied")

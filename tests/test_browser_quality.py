@@ -1,7 +1,9 @@
 import io
 import hashlib
 import json
+import os
 import queue
+import shutil
 import sys
 import tempfile
 import unittest
@@ -16,6 +18,7 @@ from run_browser_compare import (
     BROWSER_NET_MOZ_LOG,
     BROWSER_QUALITY_PREF_KEYS,
     C_TOR_SOCKS_FLAGS,
+    MarionetteClient,
     REQUIRED_DEFAULT_PREFS,
     SocksClientToProxyParser,
     SocksProxyToClientParser,
@@ -33,8 +36,14 @@ from run_browser_compare import (
     effective_arti_exit_selector_metadata,
     effective_arti_log_level,
     extra_arti_proxy_app_buffer_profile_name,
+    main as run_browser_compare_main,
     parse_dir_bad_health_gate_combos,
     parse_extra_arti_bin_specs,
+    parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos,
+    parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos,
+    parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos,
+    parse_hs_shared_hit_only_reuse_cold_late_combos,
+    parse_hs_shared_hit_only_reuse_hsdir_extend_timeout_cap_combos,
     parse_health_min_assigned_cap_combos,
     parse_same_iso_active_cap_combos,
     parse_same_iso_other_iso_assigned_cap_combos,
@@ -53,10 +62,12 @@ from run_browser_compare import (
     browser_net_log_env,
     summarize_browser_net_log,
     summarize_browser,
+    stable_fingerprint_reference_failures,
     validate_browser_fingerprint_snapshot,
     validate_browser_quality_prefs,
     validate_default_prefs,
     wait_for_line,
+    write_browser_screenshot,
 )
 from analyze_browser_compare import (
     main as analyze_browser_compare_main,
@@ -132,6 +143,7 @@ from analyze_browser_compare import (
     torfast_slow_connect_phase_rows,
     boot_directory_failure_rows,
     boot_directory_timeline_rows,
+    hspool_client_hsdir_timeout_cap_rows,
     load_tail_resource_delta_rows,
     load_tail_rows,
     load_aware_guardrail_kept_first,
@@ -201,6 +213,7 @@ from analyze_browser_compare import (
     browser_resource_byte_tap_relay_group_rows,
     browser_resource_stream_gap_byte_context_rows,
     browser_resource_stream_gap_context_rows,
+    browser_resource_stream_gap_hs_context_rows,
     browser_resource_stream_gap_phase_summary_rows,
     browser_resource_queue_selection_context_rows,
     browser_resource_queue_choice_class_summary_rows,
@@ -222,6 +235,7 @@ from analyze_browser_compare import (
     torfast_same_isolation_topup_lifecycle_rows,
     bad_health_replacement_later_proof_label,
     bad_health_replacement_nonuse_reason,
+    target_label_matches_hostname,
     torfast_socks_relay_join_gap_detail_rows,
     torfast_socks_relay_circuit_quality_rows,
     torfast_socks_relay_circuit_quality_run_summary_rows,
@@ -575,6 +589,36 @@ def browser_compare_swap_window_payload() -> dict[str, object]:
 
 
 class BrowserQualityTests(unittest.TestCase):
+    def test_marionette_read_packet_uses_total_deadline(self) -> None:
+        class FakeSocket:
+            def __init__(self) -> None:
+                self.timeout = 1.0
+                self.recv_chunks = [b"8", b":", b'{"ok":1}']
+
+            def gettimeout(self) -> float:
+                return self.timeout
+
+            def settimeout(self, value: float) -> None:
+                self.timeout = value
+
+            def recv(self, size: int) -> bytes:
+                del size
+                return self.recv_chunks.pop(0)
+
+            def sendall(self, data: bytes) -> None:
+                del data
+
+            def close(self) -> None:
+                return None
+
+        client = MarionetteClient(FakeSocket(), {})
+        with patch(
+            "run_browser_compare.time.monotonic",
+            side_effect=[100.0, 100.2, 100.8, 101.2],
+        ):
+            with self.assertRaisesRegex(TimeoutError, "marionette response timed out"):
+                client.read_packet()
+
     def test_accepts_required_default_prefs(self) -> None:
         result = validate_default_prefs(
             {"ok": True, "prefs": dict(REQUIRED_DEFAULT_PREFS)}
@@ -592,6 +636,18 @@ class BrowserQualityTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn(
             "privacy.resistFingerprinting: expected True, got False",
+            result["failures"],
+        )
+
+    def test_rejects_changed_http_tailing_pref(self) -> None:
+        prefs = dict(REQUIRED_DEFAULT_PREFS)
+        prefs["network.http.tailing.enabled"] = False
+
+        result = validate_default_prefs({"ok": True, "prefs": prefs})
+
+        self.assertFalse(result["ok"])
+        self.assertIn(
+            "network.http.tailing.enabled: expected True, got False",
             result["failures"],
         )
 
@@ -999,6 +1055,105 @@ class BrowserQualityTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
 
+    def test_validate_browser_fingerprint_snapshot_rejects_unblocked_canvas(self) -> None:
+        audit = {
+            "ok": True,
+            "snapshot": {
+                "webdriver": False,
+                "timezone": "UTC",
+                "timezoneOffset": 0,
+                "canvasProbe": {
+                    "total": 256,
+                    "matches": 256,
+                    "extractionBlocked": False,
+                    "error": None,
+                },
+            },
+        }
+
+        result = validate_browser_fingerprint_snapshot(audit)
+
+        self.assertFalse(result["ok"])
+        self.assertIn(
+            "canvasProbe.extractionBlocked: expected True, got False",
+            result["failures"],
+        )
+
+    def test_validate_browser_fingerprint_snapshot_requires_rfp_behaviors(self) -> None:
+        audit = {
+            "ok": True,
+            "snapshot": {
+                "webdriver": False,
+                "timezone": "UTC",
+                "timezoneOffset": 0,
+                "colorDepth": 30,
+                "maxTouchPoints": 5,
+            },
+        }
+
+        result = validate_browser_fingerprint_snapshot(
+            audit,
+            require_rfp_behaviors=True,
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertIn("canvasProbe: canvas extraction probe missing", result["failures"])
+        self.assertIn("colorDepth: expected 24, got 30", result["failures"])
+        self.assertIn("maxTouchPoints: expected 0, got 5", result["failures"])
+
+    def test_validate_browser_fingerprint_snapshot_accepts_rfp_behaviors(self) -> None:
+        audit = {
+            "ok": True,
+            "snapshot": {
+                "webdriver": False,
+                "timezone": "UTC",
+                "timezoneOffset": 0,
+                "colorDepth": 24,
+                "maxTouchPoints": 0,
+                "canvasProbe": {
+                    "total": 256,
+                    "matches": 0,
+                    "extractionBlocked": True,
+                    "error": None,
+                },
+            },
+        }
+
+        result = validate_browser_fingerprint_snapshot(
+            audit,
+            require_rfp_behaviors=True,
+        )
+
+        self.assertTrue(result["ok"])
+
+    def test_stable_fingerprint_reference_failures_flags_stable_key_drift(self) -> None:
+        snapshot = {
+            "userAgent": "Mozilla/5.0",
+            "hardwareConcurrency": 8,
+            "devicePixelRatio": 1,
+            "timezone": "UTC",
+        }
+        reference = {
+            "userAgent": "Mozilla/5.0",
+            "hardwareConcurrency": 4,
+            "devicePixelRatio": 2,
+            "timezone": "Atlantic/Reykjavik",
+        }
+
+        failures = stable_fingerprint_reference_failures(snapshot, reference)
+
+        self.assertEqual(failures, ["hardwareConcurrency: expected 4, got 8"])
+
+    def test_stable_fingerprint_reference_failures_requires_both_snapshots(self) -> None:
+        self.assertEqual(
+            stable_fingerprint_reference_failures(None, {}),
+            ["browser fingerprint snapshot missing for reference comparison"],
+        )
+        self.assertEqual(
+            stable_fingerprint_reference_failures({}, None),
+            ["reference fingerprint snapshot missing"],
+        )
+
     def test_validate_browser_fingerprint_consistency_rejects_profile_mismatch(self) -> None:
         good_snapshot = {
             "ok": True,
@@ -1102,6 +1257,111 @@ class BrowserQualityTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaises(ValueError):
                     parse_same_iso_active_cap_combos([value])
+
+    def test_parse_hs_shared_hit_only_reuse_hsdir_extend_timeout_cap_combos(self) -> None:
+        self.assertEqual(
+            parse_hs_shared_hit_only_reuse_hsdir_extend_timeout_cap_combos(
+                ["1:3000"]
+            ),
+            [(1, 3000)],
+        )
+        self.assertEqual(
+            parse_hs_shared_hit_only_reuse_hsdir_extend_timeout_cap_combos(
+                ["1:3000", "2:5000"]
+            ),
+            [(1, 3000), (2, 5000)],
+        )
+
+        for value in ["1", "fast:3000", "1:slow"]:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    parse_hs_shared_hit_only_reuse_hsdir_extend_timeout_cap_combos(
+                        [value]
+                    )
+
+    def test_parse_hs_shared_hit_only_reuse_cold_late_combos(self) -> None:
+        self.assertEqual(
+            parse_hs_shared_hit_only_reuse_cold_late_combos(["2:1000"]),
+            [(2, 1000)],
+        )
+        self.assertEqual(
+            parse_hs_shared_hit_only_reuse_cold_late_combos(["2:1000", "1:500"]),
+            [(2, 1000), (1, 500)],
+        )
+
+        for value in ["2", "fast:1000", "2:slow"]:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    parse_hs_shared_hit_only_reuse_cold_late_combos([value])
+
+    def test_parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos(
+        self,
+    ) -> None:
+        self.assertEqual(
+            parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos(
+                ["4096:4:1494"]
+            ),
+            [(4096, 4, 1494)],
+        )
+        self.assertEqual(
+            parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos(
+                ["4096:4:1494", "8192:4:2490"]
+            ),
+            [(4096, 4, 1494), (8192, 4, 2490)],
+        )
+
+        for value in ["4096:4", "fast:4:1494", "4096:slow:1494", "4096:4:slow"]:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos(
+                        [value]
+                    )
+
+    def test_parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos(
+        self,
+    ) -> None:
+        self.assertEqual(
+            parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos(
+                ["4096:4:1500"]
+            ),
+            [(4096, 4, 1500)],
+        )
+        self.assertEqual(
+            parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos(
+                ["4096:4:1500", "8192:5:2500"]
+            ),
+            [(4096, 4, 1500), (8192, 5, 2500)],
+        )
+
+        for value in ["4096:4", "fast:4:1500", "4096:slow:1500", "4096:4:slow"]:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos(
+                        [value]
+                    )
+
+    def test_parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos(
+        self,
+    ) -> None:
+        self.assertEqual(
+            parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos(
+                ["4096:4:996"]
+            ),
+            [(4096, 4, 996)],
+        )
+        self.assertEqual(
+            parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos(
+                ["4096:4:996", "8192:5:1494"]
+            ),
+            [(4096, 4, 996), (8192, 5, 1494)],
+        )
+
+        for value in ["4096:4", "fast:4:996", "4096:slow:996", "4096:4:slow"]:
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos(
+                        [value]
+                    )
 
     def test_parse_health_min_assigned_cap_combos(self) -> None:
         self.assertEqual(
@@ -2774,6 +3034,97 @@ class BrowserQualityTests(unittest.TestCase):
         self.assertEqual(row["next_proof"], "broader A/B")
         self.assertEqual(promotion_unresolved_slow_stream_rows(payload), [])
 
+    def test_promotion_blocker_summary_ignores_background_connect_only_side_requests(
+        self,
+    ) -> None:
+        payload = {
+            "targets": ["https://www.torproject.org/download/"],
+            "profiles": {
+                "arti_release_browser": {
+                    "boot": {"ok": True, "seconds": 10.0, "lines": []},
+                    "benchmarks": {
+                        "https://www.torproject.org/download/": {
+                            "summary": {"ok": True},
+                            "runs": [
+                                {
+                                    "run_index": 1,
+                                    "ok": True,
+                                    "load_ms": 8000,
+                                    "performance_timing": {
+                                        "time_origin_ms": 1_000_000,
+                                        "navigation": {
+                                            "responseStart": 100,
+                                            "domContentLoadedEventEnd": 1200,
+                                            "loadEventEnd": 8000,
+                                        },
+                                        "resources": [
+                                            {
+                                                "name": "https://www.torproject.org/static/js/main.js",
+                                                "initiatorType": "script",
+                                                "fetchStart": 0,
+                                                "requestStart": 50,
+                                                "responseStart": 300,
+                                                "responseEnd": 900,
+                                                "duration": 900,
+                                            },
+                                            {
+                                                "name": "https://www.torproject.org/static/images/download/svg/get-connected.svg",
+                                                "initiatorType": "img",
+                                                "fetchStart": 100,
+                                                "requestStart": 200,
+                                                "responseStart": 700,
+                                                "responseEnd": 1600,
+                                                "duration": 1500,
+                                            },
+                                        ],
+                                    },
+                                    "proxy_signal_lines": [
+                                        'timing_id=31 target_kind="hostname" target_label=cdn.example.net command=CONNECT port=443 conn_started_epoch_ms=1000200 elapsed_ms=0 torfast socks timing request parsed',
+                                        'timing_id=31 target_kind="hostname" target_label=cdn.example.net port=443 conn_started_epoch_ms=1000200 connect_ms=2298 elapsed_ms=2298 torfast socks timing stream ready',
+                                        'timing_id=32 target_kind="onion" target_label=cflareusni3s7vwh...qd.onion command=CONNECT port=443 conn_started_epoch_ms=1000300 elapsed_ms=0 torfast socks timing request parsed',
+                                        'timing_id=32 target_kind="onion" target_label=cflareusni3s7vwh...qd.onion port=443 conn_started_epoch_ms=1000300 connect_ms=5086 elapsed_ms=5086 torfast socks timing stream ready',
+                                    ],
+                                }
+                            ],
+                        }
+                    },
+                },
+                "local_c_tor_browser": {
+                    "boot": {"ok": True, "seconds": 12.0, "lines": []},
+                    "benchmarks": {
+                        "https://www.torproject.org/download/": {
+                            "summary": {"ok": True},
+                            "runs": [
+                                {
+                                    "run_index": 1,
+                                    "ok": True,
+                                    "load_ms": 9000,
+                                    "performance_timing": {
+                                        "navigation": {
+                                            "responseStart": 100,
+                                            "domContentLoadedEventEnd": 1000,
+                                            "loadEventEnd": 9000,
+                                        },
+                                        "resources": [],
+                                    },
+                                }
+                            ],
+                        }
+                    },
+                },
+            },
+        }
+
+        rows = promotion_blocker_summary_rows(payload)
+
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row["blockers"], "none seen")
+        self.assertEqual(row["slow_unresolved_streams"], 0)
+        self.assertEqual(row["slow_unresolved_onion_streams"], 0)
+        self.assertEqual(row["slow_unresolved_hostname_streams"], 0)
+        self.assertEqual(promotion_unresolved_slow_stream_rows(payload), [])
+
     def test_promotion_blocker_summary_rows_treats_stream_target_closed_as_resolved(
         self,
     ) -> None:
@@ -2845,7 +3196,9 @@ class BrowserQualityTests(unittest.TestCase):
         self.assertEqual(promotion_unresolved_slow_stream_rows(payload), [])
 
     def test_promotion_resource_queue_regression_ignores_small_noise(self) -> None:
-        def payload_with_candidate_fetch_to_request(values: list[float]) -> dict:
+        def payload_with_fetch_to_request(
+            candidate_values: list[float], baseline_values: list[float]
+        ) -> dict:
             def resource(index: int, fetch_to_request: float) -> dict:
                 return {
                     "name": f"https://example.test/r{index}.png",
@@ -2872,7 +3225,9 @@ class BrowserQualityTests(unittest.TestCase):
                                         "performance_timing": {
                                             "resources": [
                                                 resource(index, value)
-                                                for index, value in enumerate(values)
+                                                for index, value in enumerate(
+                                                    candidate_values
+                                                )
                                             ]
                                         },
                                     }
@@ -2890,8 +3245,10 @@ class BrowserQualityTests(unittest.TestCase):
                                         "ok": True,
                                         "performance_timing": {
                                             "resources": [
-                                                resource(1, 10),
-                                                resource(2, 20),
+                                                resource(index, value)
+                                                for index, value in enumerate(
+                                                    baseline_values
+                                                )
                                             ]
                                         },
                                     }
@@ -2903,12 +3260,17 @@ class BrowserQualityTests(unittest.TestCase):
             }
 
         noise_rows = promotion_resource_queue_regression_rows(
-            payload_with_candidate_fetch_to_request([20, 30]),
+            payload_with_fetch_to_request([20, 30], [10, 20]),
             candidate_profile="arti_release_browser",
             baseline_profile="local_c_tor_browser",
         )
         real_rows = promotion_resource_queue_regression_rows(
-            payload_with_candidate_fetch_to_request([20, 170]),
+            payload_with_fetch_to_request([20, 170], [10, 20]),
+            candidate_profile="arti_release_browser",
+            baseline_profile="local_c_tor_browser",
+        )
+        max_only_outlier_rows = promotion_resource_queue_regression_rows(
+            payload_with_fetch_to_request([0, 0, 1650], [1000, 1000, 1000]),
             candidate_profile="arti_release_browser",
             baseline_profile="local_c_tor_browser",
         )
@@ -2916,6 +3278,7 @@ class BrowserQualityTests(unittest.TestCase):
         self.assertEqual(noise_rows, [])
         self.assertEqual(len(real_rows), 1)
         self.assertEqual(real_rows[0]["max_fetch_to_request_delta_ms"], 150.0)
+        self.assertEqual(max_only_outlier_rows, [])
 
     def test_promotion_blocker_summary_rows_block_failed_baseline(self) -> None:
         payload = {
@@ -3664,11 +4027,32 @@ class BrowserQualityTests(unittest.TestCase):
         self.assertNotIn(
             "TORFAST_STREAM_READY_DATA_COALESCE_BYTES", started["env"]
         )
+        self.assertNotIn(
+            "TORFAST_STREAM_READY_DATA_COALESCE_MIN_HOP", started["env"]
+        )
+        self.assertNotIn(
+            "TORFAST_STREAM_READY_DATA_COALESCE_START_BACKLOG_BYTES",
+            started["env"],
+        )
+        self.assertNotIn(
+            "TORFAST_HS_RENDEZVOUS_ESTABLISH_TIMEOUT_FLOOR_MS", started["env"]
+        )
 
     def test_byte_timing_log_level_keeps_hs_phase_rows(self) -> None:
         self.assertEqual(
             effective_arti_log_level("info", True),
             "info,tor_proto=debug,tor_hsclient=debug",
+        )
+
+    def test_hspool_race_log_level_stays_symmetric(self) -> None:
+        self.assertEqual(
+            effective_arti_log_level(
+                "info",
+                False,
+                hspool_on_demand_race_ms=50,
+                hs_desc_shared_cache=True,
+            ),
+            "info,tor_hsclient=debug",
         )
 
     def test_start_arti_sets_lab_env_overrides(self) -> None:
@@ -3697,14 +4081,21 @@ class BrowserQualityTests(unittest.TestCase):
                 exit_launch_parallelism=2,
                 hspool_launch_parallelism=3,
                 hspool_background_start_delay_ms=0,
+                hspool_background_start_on_demand=True,
                 hspool_on_demand_grace_ms=50,
                 hspool_on_demand_race_ms=75,
+                hspool_background_build_timeout_cap_ms=3000,
+                hspool_client_hsdir_extend_timeout_cap_ms=2500,
+                hspool_client_hsdir_extend_timeout_cap_startup_only=True,
                 socks_connect_soft_timeout_ms=5000,
                 socks_connect_soft_timeout_attempts=3,
                 socks_connect_hedge_ms=1500,
                 socks_relay_byte_timing=True,
                 socks_tor_to_client_coalesce_bytes=4096,
                 stream_ready_data_coalesce_bytes=8192,
+                stream_ready_data_coalesce_min_hop=4,
+                stream_ready_data_coalesce_start_backlog_bytes=1494,
+                stream_ready_data_coalesce_busy_max_bytes=996,
                 stream_scheduler_burst=2,
                 socks_partial_relay_idle_timeout_ms=4000,
                 socks_no_tor_byte_relay_timeout_ms=5000,
@@ -3731,8 +4122,11 @@ class BrowserQualityTests(unittest.TestCase):
                 exit_same_isolation_prefer_topup_on_tie=True,
                 hs_intro_rend_overlap=True,
                 hs_rend_prebuild_before_desc=True,
+                hs_rend_prebuild_before_desc_shared_hit_only=True,
+                hs_rend_prebuild_cold_after_desc_stream_ready_ms=1000,
                 hs_desc_shared_cache=True,
                 hs_intro_circuit_hedge_ms=1500,
+                hs_rendezvous_establish_timeout_floor_ms=1500,
                 dir_select_spread=True,
                 dir_incremental_microdescs=True,
                 dir_microdesc_early_usable_notify=True,
@@ -3762,10 +4156,25 @@ class BrowserQualityTests(unittest.TestCase):
             started["env"]["TORFAST_HSPOOL_BACKGROUND_START_DELAY_MS"], "0"
         )
         self.assertEqual(
+            started["env"]["TORFAST_HSPOOL_BACKGROUND_START_ON_DEMAND"], "1"
+        )
+        self.assertEqual(
             started["env"]["TORFAST_HSPOOL_ON_DEMAND_POOL_GRACE_MS"], "50"
         )
         self.assertEqual(
             started["env"]["TORFAST_HSPOOL_ON_DEMAND_POOL_RACE_MS"], "75"
+        )
+        self.assertEqual(
+            started["env"]["TORFAST_HSPOOL_BACKGROUND_BUILD_TIMEOUT_CAP_MS"], "3000"
+        )
+        self.assertEqual(
+            started["env"]["TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_MS"], "2500"
+        )
+        self.assertEqual(
+            started["env"][
+                "TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_STARTUP_ONLY"
+            ],
+            "1",
         )
         self.assertEqual(
             started["env"]["TORFAST_SOCKS_CONNECT_SOFT_TIMEOUT_MS"], "5000"
@@ -3782,9 +4191,23 @@ class BrowserQualityTests(unittest.TestCase):
         self.assertEqual(
             started["env"]["TORFAST_HS_REND_PREBUILD_BEFORE_DESC"], "1"
         )
+        self.assertEqual(
+            started["env"]["TORFAST_HS_REND_PREBUILD_BEFORE_DESC_SHARED_HIT_ONLY"],
+            "1",
+        )
+        self.assertEqual(
+            started["env"][
+                "TORFAST_HS_REND_PREBUILD_COLD_AFTER_DESC_STREAM_READY_MS"
+            ],
+            "1000",
+        )
         self.assertEqual(started["env"]["TORFAST_HS_DESC_SHARED_CACHE"], "1")
         self.assertEqual(
             started["env"]["TORFAST_HS_INTRO_CIRCUIT_HEDGE_MS"], "1500"
+        )
+        self.assertEqual(
+            started["env"]["TORFAST_HS_RENDEZVOUS_ESTABLISH_TIMEOUT_FLOOR_MS"],
+            "1500",
         )
         self.assertEqual(started["env"]["TORFAST_SOCKS_RELAY_BYTE_TIMING"], "1")
         self.assertEqual(
@@ -3794,6 +4217,17 @@ class BrowserQualityTests(unittest.TestCase):
         self.assertEqual(
             started["env"]["TORFAST_STREAM_READY_DATA_COALESCE_BYTES"],
             "8192",
+        )
+        self.assertEqual(
+            started["env"]["TORFAST_STREAM_READY_DATA_COALESCE_MIN_HOP"], "4"
+        )
+        self.assertEqual(
+            started["env"]["TORFAST_STREAM_READY_DATA_COALESCE_START_BACKLOG_BYTES"],
+            "1494",
+        )
+        self.assertEqual(
+            started["env"]["TORFAST_STREAM_READY_DATA_COALESCE_BUSY_MAX_BYTES"],
+            "996",
         )
         self.assertEqual(started["env"]["TORFAST_STREAM_SCHEDULER_BURST"], "2")
         self.assertEqual(started["env"]["TORFAST_CIRCUIT_CONGESTION_LOG"], "1")
@@ -4192,6 +4626,32 @@ class BrowserQualityTests(unittest.TestCase):
             self.assertEqual(artifacts["errors"], [])
             self.assertEqual(artifacts["retain_reason"], "failed_run")
 
+    def test_write_browser_screenshot_retries_after_missing_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            screenshot_path = Path(tmp) / "screenshots" / "page.png"
+            raw_png = b"fake-png"
+            original_write_bytes = Path.write_bytes
+            injected_failure = {"count": 0}
+
+            def flaky_write_bytes(path_obj: Path, data: bytes) -> int:
+                if path_obj == screenshot_path and injected_failure["count"] == 0:
+                    injected_failure["count"] += 1
+                    shutil.rmtree(screenshot_path.parent, ignore_errors=True)
+                    raise FileNotFoundError(str(screenshot_path))
+                return original_write_bytes(path_obj, data)
+
+            with patch.object(
+                Path,
+                "write_bytes",
+                autospec=True,
+                side_effect=flaky_write_bytes,
+            ):
+                write_browser_screenshot(screenshot_path, raw_png)
+
+            self.assertEqual(injected_failure["count"], 1)
+            self.assertTrue(screenshot_path.exists())
+            self.assertEqual(screenshot_path.read_bytes(), raw_png)
+
     def test_browser_net_log_env_sets_moz_log_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             log_path = Path(tmp) / "browser.mozlog"
@@ -4403,7 +4863,6 @@ class BrowserQualityTests(unittest.TestCase):
                                     "upstream_local_port": 60123,
                                     "upstream_peer_port": 19082,
                                     "browser_peer_port": 55222,
-                                    "socks_auth_password_sha256_12": "0123456789ab",
                                     "socks_reply_tag_bind_port": 40007,
                                     "socks_target_host": "www.torproject.org",
                                 }
@@ -4448,9 +4907,7 @@ class BrowserQualityTests(unittest.TestCase):
         self.assertEqual(stream_bridge_rows[0]["client_peer_port"], 60123)
         self.assertEqual(stream_bridge_rows[0]["timing_id"], 9)
         self.assertEqual(stream_bridge_rows[0]["stream_id"], 77)
-        self.assertEqual(
-            stream_bridge_rows[0]["ci_socks_password_sha256_12"], "0123456789ab"
-        )
+        self.assertEqual(stream_bridge_rows[0]["ci_socks_password_sha256_12"], "0123456789ab")
         self.assertEqual(len(evidence_rows), 1)
         self.assertEqual(evidence_rows[0]["matched_resources"], 1)
         self.assertEqual(evidence_rows[0]["parent_channels"], 1)
@@ -4464,7 +4921,7 @@ class BrowserQualityTests(unittest.TestCase):
         self.assertEqual(len(activity_evidence_rows), 1)
         self.assertEqual(activity_evidence_rows[0]["http_activity_rows"], 1)
         self.assertEqual(activity_evidence_rows[0]["ci_auth_rows"], 1)
-        self.assertEqual(activity_evidence_rows[0]["ci_auth_tap_matches"], 1)
+        self.assertEqual(activity_evidence_rows[0]["ci_auth_tap_matches"], 0)
         self.assertEqual(activity_evidence_rows[0]["ci_auth_buckets"], 1)
         self.assertEqual(activity_evidence_rows[0]["nonzero_local_port_rows"], 1)
         self.assertEqual(activity_evidence_rows[0]["exact_local_socks_rows"], 0)
@@ -5097,6 +5554,79 @@ class BrowserQualityTests(unittest.TestCase):
         self.assertEqual(result["boot"], {"ok": False, "error": "test boot failed"})
         self.assertIsNone(result["arti_exit_select_health_aware_min_assigned"])
 
+    def test_run_arti_passes_hspool_and_hs_lab_args_to_start_arti(self) -> None:
+        class FakeProc:
+            returncode = 0
+
+            def poll(self) -> int:
+                return 0
+
+        started: list[dict[str, object]] = []
+
+        def fake_start_arti(**kwargs):
+            started.append(kwargs)
+            return FakeProc(), queue.Queue()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch("run_browser_compare.start_arti", side_effect=fake_start_arti),
+                patch(
+                    "run_browser_compare.wait_for_line",
+                    return_value={"ok": False, "error": "test boot failed"},
+                ),
+            ):
+                run_arti(
+                    arti_bin=Path("/tmp/fake-arti"),
+                    port=19082,
+                    output_dir=Path(tmp),
+                    browser_bin=Path("/tmp/fake-browser"),
+                    targets=[],
+                    runs=0,
+                    timeout=1.0,
+                    window_size="1000,1000",
+                    arti_hspool_launch_parallelism=3,
+                    arti_hspool_background_start_delay_ms=0,
+                    arti_hspool_background_start_on_demand=True,
+                    arti_hspool_guarded_stem_target=4,
+                    arti_hspool_guarded_stem_target_defer_post_boot=True,
+                    arti_hspool_on_demand_grace_ms=50,
+                    arti_hspool_on_demand_race_ms=75,
+                    arti_hspool_background_build_timeout_cap_ms=2500,
+                    arti_hspool_client_hsdir_extend_timeout_cap_ms=3000,
+                    arti_hspool_client_hsdir_extend_timeout_cap_startup_only=True,
+                    arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only=True,
+                    arti_hs_intro_rend_overlap=True,
+                    arti_hs_rend_prebuild_before_desc=True,
+                    arti_hs_rend_prebuild_before_desc_shared_hit_only=True,
+                    arti_hs_state_reuse_max_active_streams=1,
+                    arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms=1000,
+                    arti_hs_desc_shared_cache=True,
+                    arti_hs_intro_circuit_hedge_ms=1500,
+                )
+
+        self.assertEqual(len(started), 1)
+        kwargs = started[0]
+        self.assertEqual(kwargs["hspool_launch_parallelism"], 3)
+        self.assertEqual(kwargs["hspool_background_start_delay_ms"], 0)
+        self.assertTrue(kwargs["hspool_background_start_on_demand"])
+        self.assertEqual(kwargs["hspool_guarded_stem_target"], 4)
+        self.assertTrue(kwargs["hspool_guarded_stem_target_defer_post_boot"])
+        self.assertEqual(kwargs["hspool_on_demand_grace_ms"], 50)
+        self.assertEqual(kwargs["hspool_on_demand_race_ms"], 75)
+        self.assertEqual(kwargs["hspool_background_build_timeout_cap_ms"], 2500)
+        self.assertEqual(kwargs["hspool_client_hsdir_extend_timeout_cap_ms"], 3000)
+        self.assertTrue(kwargs["hspool_client_hsdir_extend_timeout_cap_startup_only"])
+        self.assertTrue(kwargs["hspool_client_hsdir_extend_timeout_cap_post_boot_only"])
+        self.assertTrue(kwargs["hs_intro_rend_overlap"])
+        self.assertTrue(kwargs["hs_rend_prebuild_before_desc"])
+        self.assertTrue(kwargs["hs_rend_prebuild_before_desc_shared_hit_only"])
+        self.assertEqual(kwargs["hs_state_reuse_max_active_streams"], 1)
+        self.assertEqual(
+            kwargs["hs_rend_prebuild_cold_after_desc_stream_ready_ms"], 1000
+        )
+        self.assertTrue(kwargs["hs_desc_shared_cache"])
+        self.assertEqual(kwargs["hs_intro_circuit_hedge_ms"], 1500)
+
     def test_cleanup_named_paths_removes_directories(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "data"
@@ -5156,7 +5686,8 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
             )
             data_stream.mkdir(parents=True)
             (data_stream / "data.rs").write_text(
-                "TORFAST_STREAM_READY_DATA_COALESCE_BYTES",
+                "TORFAST_STREAM_READY_DATA_COALESCE_BYTES "
+                "TORFAST_STREAM_READY_DATA_COALESCE_BUSY_MAX_BYTES",
                 encoding="utf-8",
             )
             impls = root / "crates" / "tor-circmgr" / "src" / "impls.rs"
@@ -5189,28 +5720,53 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
                 "TORFAST_EXIT_SAME_ISOLATION_REQUIRE_BAD_HEALTH "
                 "TORFAST_EXIT_SELECT_PREFER_COLD_SAME_ISOLATION "
                 "const TORFAST_EXIT_SELECT_GUARDED_SAME_ISOLATION_ACTIVE_CAP_DEFAULT: u64 = 2; "
-                "fn torfast_exit_select_load_aware() -> bool { torfast_env_flag(std::env::var(TORFAST_EXIT_SELECT_LOAD_AWARE_ENV).ok(), true) } "
-                "fn torfast_exit_select_health_aware() -> bool { torfast_env_flag(std::env::var(TORFAST_EXIT_SELECT_HEALTH_AWARE_ENV).ok(), true) } "
-                "fn torfast_exit_select_avoid_bad_health() -> bool { torfast_env_flag(std::env::var(TORFAST_EXIT_SELECT_AVOID_BAD_HEALTH_ENV).ok(), true) } "
-                "fn torfast_exit_select_prefer_cold_same_isolation() -> bool { torfast_env_flag(std::env::var(TORFAST_EXIT_SELECT_PREFER_COLD_SAME_ISOLATION_ENV).ok(), true) } ",
+                "fn torfast_exit_select_load_aware() -> bool {\n"
+                "    torfast_env_flag(std::env::var(TORFAST_EXIT_SELECT_LOAD_AWARE_ENV).ok(), true)\n"
+                "}\n"
+                "fn torfast_exit_select_health_aware() -> bool {\n"
+                "    torfast_env_flag(std::env::var(TORFAST_EXIT_SELECT_HEALTH_AWARE_ENV).ok(), true)\n"
+                "}\n"
+                "fn torfast_exit_select_avoid_bad_health() -> bool {\n"
+                "    torfast_env_flag(std::env::var(TORFAST_EXIT_SELECT_AVOID_BAD_HEALTH_ENV).ok(), true)\n"
+                "}\n"
+                "fn torfast_exit_select_prefer_cold_same_isolation() -> bool {\n"
+                "    torfast_env_flag(std::env::var(TORFAST_EXIT_SELECT_PREFER_COLD_SAME_ISOLATION_ENV).ok(), true)\n"
+                "}\n",
                 encoding="utf-8",
             )
             (source / "hspool.rs").write_text(
                 'const TORFAST_HSPOOL_BACKGROUND_START_DELAY_MS_ENV: &str = "TORFAST_HSPOOL_BACKGROUND_START_DELAY_MS"; '
                 "const TORFAST_HSPOOL_BACKGROUND_START_DELAY_DEFAULT_MS: u64 = 1_000; "
+                'const TORFAST_HSPOOL_BACKGROUND_START_ON_DEMAND_ENV: &str = "TORFAST_HSPOOL_BACKGROUND_START_ON_DEMAND"; '
                 'const TORFAST_HSPOOL_LAUNCH_PARALLELISM_ENV: &str = "TORFAST_HSPOOL_LAUNCH_PARALLELISM"; '
                 "const TORFAST_HSPOOL_LAUNCH_PARALLELISM_DEFAULT: usize = 1; "
                 'const TORFAST_HSPOOL_ON_DEMAND_POOL_GRACE_MS_ENV: &str = "TORFAST_HSPOOL_ON_DEMAND_POOL_GRACE_MS"; '
                 "const TORFAST_HSPOOL_ON_DEMAND_POOL_GRACE_DEFAULT_MS: u64 = 0; "
                 'const TORFAST_HSPOOL_ON_DEMAND_POOL_RACE_MS_ENV: &str = "TORFAST_HSPOOL_ON_DEMAND_POOL_RACE_MS"; '
-                "const TORFAST_HSPOOL_ON_DEMAND_POOL_RACE_DEFAULT_MS: u64 = 0; ",
+                "const TORFAST_HSPOOL_ON_DEMAND_POOL_RACE_DEFAULT_MS: u64 = 0; "
+                'const TORFAST_HSPOOL_BACKGROUND_BUILD_TIMEOUT_CAP_MS_ENV: &str = "TORFAST_HSPOOL_BACKGROUND_BUILD_TIMEOUT_CAP_MS"; '
+                'const TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_MS_ENV: &str = "TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_MS"; ',
                 encoding="utf-8",
             )
             hspool_mod = source / "hspool"
             hspool_mod.mkdir()
             (hspool_mod / "pool.rs").write_text(
                 "const DEFAULT_GUARDED_STEM_TARGET: usize = 2; "
-                'const TORFAST_HSPOOL_GUARDED_STEM_TARGET_ENV: &str = "TORFAST_HSPOOL_GUARDED_STEM_TARGET"; ',
+                'const TORFAST_HSPOOL_GUARDED_STEM_TARGET_ENV: &str = "TORFAST_HSPOOL_GUARDED_STEM_TARGET"; '
+                'const TORFAST_HSPOOL_GUARDED_STEM_TARGET_DEFER_POST_BOOT_ENV: &str = "TORFAST_HSPOOL_GUARDED_STEM_TARGET_DEFER_POST_BOOT"; '
+                "fn torfast_hspool_guarded_stem_target_defer_post_boot_from_env_value() {} "
+                "fn torfast_hspool_guarded_stem_target_defer_post_boot() {} "
+                "deferred_guarded_stem_target "
+                "enable_guarded_stem_target_after_post_boot "
+                'const TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_STARTUP_ONLY_ENV: &str = "TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_STARTUP_ONLY"; '
+                'const TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_POST_BOOT_ONLY_ENV: &str = "TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_POST_BOOT_ONLY"; '
+                "fn torfast_hspool_client_hsdir_extend_timeout_cap_startup_only_from_env_value() {} "
+                "fn torfast_hspool_client_hsdir_extend_timeout_cap_startup_only() {} "
+                "fn torfast_hspool_client_hsdir_extend_timeout_cap_post_boot_only_from_env_value() {} "
+                "fn torfast_hspool_client_hsdir_extend_timeout_cap_post_boot_only() {} "
+                "client_hsdir_extend_timeout_cap_enabled "
+                "disable_client_hsdir_extend_timeout_cap_after_bootstrap "
+                "enable_client_hsdir_extend_timeout_cap_after_bootstrap ",
                 encoding="utf-8",
             )
             hsclient = root / "crates" / "tor-hsclient" / "src"
@@ -5218,8 +5774,11 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
             (hsclient / "connect.rs").write_text(
                 'const TORFAST_HS_INTRO_REND_OVERLAP_ENV: &str = "TORFAST_HS_INTRO_REND_OVERLAP"; '
                 'const TORFAST_HS_REND_PREBUILD_BEFORE_DESC_ENV: &str = "TORFAST_HS_REND_PREBUILD_BEFORE_DESC"; '
+                'const TORFAST_HS_REND_PREBUILD_BEFORE_DESC_SHARED_HIT_ONLY_ENV: &str = "TORFAST_HS_REND_PREBUILD_BEFORE_DESC_SHARED_HIT_ONLY"; '
+                'const TORFAST_HS_REND_PREBUILD_COLD_AFTER_DESC_STREAM_READY_MS_ENV: &str = "TORFAST_HS_REND_PREBUILD_COLD_AFTER_DESC_STREAM_READY_MS"; '
                 'const TORFAST_HS_DESC_SHARED_CACHE_ENV: &str = "TORFAST_HS_DESC_SHARED_CACHE"; '
-                'const TORFAST_HS_INTRO_CIRCUIT_HEDGE_MS_ENV: &str = "TORFAST_HS_INTRO_CIRCUIT_HEDGE_MS";',
+                'const TORFAST_HS_INTRO_CIRCUIT_HEDGE_MS_ENV: &str = "TORFAST_HS_INTRO_CIRCUIT_HEDGE_MS"; '
+                'const TORFAST_HS_RENDEZVOUS_ESTABLISH_TIMEOUT_FLOOR_MS_ENV: &str = "TORFAST_HS_RENDEZVOUS_ESTABLISH_TIMEOUT_FLOOR_MS";',
                 encoding="utf-8",
             )
 
@@ -5234,21 +5793,49 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
             self.assertEqual(tweaks["arti_hspool_launch_parallelism_default"], 1)
             self.assertTrue(tweaks["arti_hspool_background_start_delay_lab"])
             self.assertEqual(tweaks["arti_hspool_background_start_delay_default_ms"], 1000)
+            self.assertTrue(tweaks["arti_hspool_background_start_on_demand_lab"])
+            self.assertTrue(tweaks["arti_hspool_background_build_timeout_cap_lab"])
+            self.assertTrue(
+                tweaks["arti_hspool_client_hsdir_extend_timeout_cap_lab"]
+            )
+            self.assertTrue(
+                tweaks[
+                    "arti_hspool_client_hsdir_extend_timeout_cap_startup_only_lab"
+                ]
+            )
+            self.assertTrue(
+                tweaks[
+                    "arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only_lab"
+                ]
+            )
             self.assertTrue(tweaks["arti_hspool_on_demand_grace_lab"])
             self.assertEqual(tweaks["arti_hspool_on_demand_grace_default_ms"], 0)
             self.assertTrue(tweaks["arti_hspool_on_demand_race_lab"])
             self.assertEqual(tweaks["arti_hspool_on_demand_race_default_ms"], 0)
             self.assertTrue(tweaks["arti_hspool_guarded_stem_target_lab"])
             self.assertEqual(tweaks["arti_hspool_guarded_stem_target_default"], 2)
+            self.assertTrue(
+                tweaks["arti_hspool_guarded_stem_target_defer_post_boot_lab"]
+            )
             self.assertTrue(tweaks["arti_hs_intro_rend_overlap_lab"])
             self.assertTrue(tweaks["arti_hs_rend_prebuild_before_desc_lab"])
+            self.assertTrue(
+                tweaks["arti_hs_rend_prebuild_before_desc_shared_hit_only_lab"]
+            )
+            self.assertTrue(
+                tweaks["arti_hs_rend_prebuild_cold_after_desc_stream_ready_lab"]
+            )
             self.assertTrue(tweaks["arti_hs_desc_shared_cache_lab"])
             self.assertTrue(tweaks["arti_hs_intro_circuit_hedge_lab"])
+            self.assertTrue(
+                tweaks["arti_hs_rendezvous_establish_timeout_floor_lab"]
+            )
             self.assertTrue(tweaks["arti_socks_connect_soft_timeout_lab"])
             self.assertTrue(tweaks["arti_socks_connect_hedge_lab"])
             self.assertTrue(tweaks["arti_socks_relay_byte_timing_lab"])
             self.assertTrue(tweaks["arti_socks_tor_to_client_coalesce_lab"])
             self.assertTrue(tweaks["arti_stream_ready_data_coalesce_lab"])
+            self.assertTrue(tweaks["arti_stream_ready_data_coalesce_busy_max_lab"])
             self.assertTrue(tweaks["arti_proxy_app_stream_buffer_lab"])
             self.assertTrue(tweaks["arti_circuit_congestion_log_lab"])
             self.assertTrue(tweaks["arti_stream_scheduler_log_lab"])
@@ -5506,6 +6093,12 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
                     window_size="1000,1000",
                     warm_cache=True,
                     arti_exit_select_parallelism=3,
+                    arti_hspool_launch_parallelism=3,
+                    arti_hspool_background_start_delay_ms=4000,
+                    arti_hspool_guarded_stem_target=5,
+                    arti_hspool_guarded_stem_target_defer_post_boot=True,
+                    arti_hspool_on_demand_grace_ms=25,
+                    arti_hspool_on_demand_race_ms=60,
                     arti_min_exit_circs_for_port=3,
                     arti_socks_connect_soft_timeout_ms=5000,
                     arti_socks_connect_soft_timeout_attempts=2,
@@ -5529,7 +6122,65 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
                     extra_arti_hs_intro_rend_overlap=True,
                     extra_arti_hs_rend_prebuild_before_desc=True,
                     extra_arti_hs_desc_shared_cache=True,
+                    extra_arti_hs_rend_prebuild_before_desc_shared_cache=True,
+                    extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only=True,
+                    extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_stream_ready_data_coalesce_bytes=[
+                        4096
+                    ],
+                    extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_guarded_stem_target=[
+                        4
+                    ],
+                    extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_cold_late_ms=[
+                        1000
+                    ],
+                    extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_cold_late_combos=[
+                        (2, 1000)
+                    ],
+                    extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_startup_only_hsdir_extend_timeout_cap_combos=[
+                        (1, 3000)
+                    ],
                     extra_arti_hs_intro_circuit_hedge_ms=[1500],
+                    extra_arti_hs_desc_shared_cache_intro_circuit_hedge_ms=[500],
+                    extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_ms=[
+                        3000
+                    ],
+                    extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_startup_only_ms=[
+                        3000
+                    ],
+                    extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_post_boot_only_ms=[
+                        3000
+                    ],
+                    extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand=True,
+                    extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand_hsdir_extend_timeout_cap_startup_only_ms=[
+                        2500
+                    ],
+                    extra_arti_hs_desc_shared_cache_hspool_on_demand_race_ms=[
+                        150
+                    ],
+                    extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_ms=[
+                        150
+                    ],
+                    extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_background_build_timeout_cap_combos=[
+                        (150, 3000)
+                    ],
+                    extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_combos=[
+                        (150, 2500)
+                    ],
+                    extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_boot_combos=[
+                        (150, 2000, 4)
+                    ],
+                    extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge_combos=[
+                        (150, 500)
+                    ],
+                    extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_combos=[
+                        (150, 5000)
+                    ],
+                    extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism_combos=[
+                        (150, 5000, 2)
+                    ],
+                    extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_guarded_stem_target_defer_post_boot_combos=[
+                        (150, 5000, 4)
+                    ],
                     extra_arti_proxy_buffer_size=["1 MB"],
                     extra_arti_socks_connect_soft_timeout_ms=[1500],
                     extra_arti_socks_connect_soft_timeout_attempts=[3],
@@ -5573,6 +6224,9 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
                     extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_partial_retry_chunking=(
                         True
                     ),
+                    extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_partial_retry_chunking_bad_health_replacement_gate_combos=[
+                        (5000, 5, 3)
+                    ],
                     extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_partial_retry_chunking_max_active_streams=[
                         2
                     ],
@@ -5597,6 +6251,9 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
                         (2, 1)
                     ],
                     extra_arti_exit_select_prefer_cold_same_isolation_prewarm_target=[
+                        2
+                    ],
+                    extra_arti_exit_select_health_aware_same_isolation_prefer_cold_prewarm_target=[
                         2
                     ],
                     extra_arti_exit_select_health_aware_same_isolation_prefer_cold_prewarm_pending_wait=[
@@ -5628,11 +6285,36 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
 
         self.assertEqual(
             calls,
-            [(port, 1) for port in range(19080, 19141)],
+            [(port, 1) for port in range(19080, 19165)],
         )
         self.assertEqual(
             profiles["arti_release_browser"]["arti_exit_select_parallelism_override"],
             3,
+        )
+        self.assertEqual(
+            profiles["arti_release_browser"]["arti_hspool_launch_parallelism"],
+            3,
+        )
+        self.assertEqual(
+            profiles["arti_release_browser"]["arti_hspool_background_start_delay_ms"],
+            4000,
+        )
+        self.assertEqual(
+            profiles["arti_release_browser"]["arti_hspool_guarded_stem_target"],
+            5,
+        )
+        self.assertTrue(
+            profiles["arti_release_browser"][
+                "arti_hspool_guarded_stem_target_defer_post_boot"
+            ]
+        )
+        self.assertEqual(
+            profiles["arti_release_browser"]["arti_hspool_on_demand_grace_ms"],
+            25,
+        )
+        self.assertEqual(
+            profiles["arti_release_browser"]["arti_hspool_on_demand_race_ms"],
+            60,
         )
         self.assertEqual(
             profiles["arti_release_browser"][
@@ -5735,6 +6417,33 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
             1,
         )
         self.assertEqual(
+            profiles["arti_release_browser_exit1"]["arti_hspool_launch_parallelism"],
+            3,
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_exit1"][
+                "arti_hspool_background_start_delay_ms"
+            ],
+            4000,
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_exit1"]["arti_hspool_guarded_stem_target"],
+            5,
+        )
+        self.assertTrue(
+            profiles["arti_release_browser_exit1"][
+                "arti_hspool_guarded_stem_target_defer_post_boot"
+            ]
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_exit1"]["arti_hspool_on_demand_grace_ms"],
+            25,
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_exit1"]["arti_hspool_on_demand_race_ms"],
+            60,
+        )
+        self.assertEqual(
             profiles["arti_release_browser_exit1"][
                 "arti_min_exit_circs_for_port_override"
             ],
@@ -5796,11 +6505,483 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
                 "arti_hs_desc_shared_cache"
             ]
         )
+        self.assertTrue(
+            profiles["arti_release_browser_hsrendpredesc_hsdescshare"][
+                "arti_hs_rend_prebuild_before_desc"
+            ]
+        )
+        self.assertTrue(
+            profiles["arti_release_browser_hsrendpredesc_hsdescshare"][
+                "arti_hs_desc_shared_cache"
+            ]
+        )
+        self.assertTrue(
+            profiles["arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly"][
+                "arti_hs_rend_prebuild_before_desc"
+            ]
+        )
+        self.assertTrue(
+            profiles["arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly"][
+                "arti_hs_rend_prebuild_before_desc_shared_hit_only"
+            ]
+        )
+        self.assertTrue(
+            profiles["arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly"][
+                "arti_hs_desc_shared_cache"
+            ]
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly"][
+                "arti_hspool_launch_parallelism"
+            ],
+            3,
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly"][
+                "arti_hspool_background_start_delay_ms"
+            ],
+            4000,
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly"][
+                "arti_hspool_guarded_stem_target"
+            ],
+            5,
+        )
+        self.assertTrue(
+            profiles["arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly"][
+                "arti_hspool_guarded_stem_target_defer_post_boot"
+            ]
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly"][
+                "arti_hspool_on_demand_grace_ms"
+            ],
+            25,
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly"][
+                "arti_hspool_on_demand_race_ms"
+            ],
+            60,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_streamreadycoalesce4096"
+            ]["arti_hs_rend_prebuild_before_desc"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_streamreadycoalesce4096"
+            ]["arti_hs_rend_prebuild_before_desc_shared_hit_only"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_streamreadycoalesce4096"
+            ]["arti_hs_desc_shared_cache"]
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_streamreadycoalesce4096"
+            ]["arti_stream_ready_data_coalesce_bytes"],
+            4096,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hspoolguarded4"
+            ]["arti_hs_rend_prebuild_before_desc"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hspoolguarded4"
+            ]["arti_hs_rend_prebuild_before_desc_shared_hit_only"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hspoolguarded4"
+            ]["arti_hs_desc_shared_cache"]
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hspoolguarded4"
+            ]["arti_hspool_guarded_stem_target"],
+            4,
+        )
+        self.assertFalse(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hspoolguarded4"
+            ]["arti_hspool_guarded_stem_target_defer_post_boot"]
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hspoolguarded4"
+            ]["arti_hspool_on_demand_race_ms"],
+            60,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_coldlate1000ms"
+            ]["arti_hs_rend_prebuild_before_desc"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_coldlate1000ms"
+            ]["arti_hs_rend_prebuild_before_desc_shared_hit_only"]
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_coldlate1000ms"
+            ]["arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms"],
+            1000,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_coldlate1000ms"
+            ]["arti_hs_desc_shared_cache"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive2_coldlate1000ms"
+            ]["arti_hs_rend_prebuild_before_desc"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive2_coldlate1000ms"
+            ]["arti_hs_rend_prebuild_before_desc_shared_hit_only"]
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive2_coldlate1000ms"
+            ]["arti_hs_state_reuse_max_active_streams"],
+            2,
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive2_coldlate1000ms"
+            ]["arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms"],
+            1000,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive2_coldlate1000ms"
+            ]["arti_hs_desc_shared_cache"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive1_hsdirextendcap3000ms_startuponly"
+            ]["arti_hs_rend_prebuild_before_desc"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive1_hsdirextendcap3000ms_startuponly"
+            ]["arti_hs_rend_prebuild_before_desc_shared_hit_only"]
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive1_hsdirextendcap3000ms_startuponly"
+            ]["arti_hs_state_reuse_max_active_streams"],
+            1,
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive1_hsdirextendcap3000ms_startuponly"
+            ]["arti_hspool_client_hsdir_extend_timeout_cap_ms"],
+            3000,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive1_hsdirextendcap3000ms_startuponly"
+            ]["arti_hspool_client_hsdir_extend_timeout_cap_startup_only"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_hsreuseactive1_hsdirextendcap3000ms_startuponly"
+            ]["arti_hs_desc_shared_cache"]
+        )
         self.assertEqual(
             profiles["arti_release_browser_hsintrohedge1500ms"][
                 "arti_hs_intro_circuit_hedge_ms"
             ],
             1500,
+        )
+        self.assertTrue(
+            profiles["arti_release_browser_hsdescshare_hsintrohedge500ms"][
+                "arti_hs_desc_shared_cache"
+            ]
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_hsdescshare_hsintrohedge500ms"][
+                "arti_hs_intro_circuit_hedge_ms"
+            ],
+            500,
+        )
+        self.assertTrue(
+            profiles["arti_release_browser_hsdescshare_hsdirextendcap3000ms"][
+                "arti_hs_desc_shared_cache"
+            ]
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_hsdescshare_hsdirextendcap3000ms"][
+                "arti_hspool_client_hsdir_extend_timeout_cap_ms"
+            ],
+            3000,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hsdirextendcap3000ms_startuponly"
+            ]["arti_hs_desc_shared_cache"]
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hsdirextendcap3000ms_startuponly"
+            ]["arti_hspool_client_hsdir_extend_timeout_cap_ms"],
+            3000,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hsdirextendcap3000ms_startuponly"
+            ]["arti_hspool_client_hsdir_extend_timeout_cap_startup_only"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hsdirextendcap3000ms_postbootonly"
+            ]["arti_hs_desc_shared_cache"]
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hsdirextendcap3000ms_postbootonly"
+            ]["arti_hspool_client_hsdir_extend_timeout_cap_ms"],
+            3000,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hsdirextendcap3000ms_postbootonly"
+            ]["arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolbgondemand"
+            ]["arti_hs_desc_shared_cache"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolbgondemand"
+            ]["arti_hspool_background_start_on_demand"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolbgondemand_hsdirextendcap2500ms_startuponly"
+            ]["arti_hs_desc_shared_cache"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolbgondemand_hsdirextendcap2500ms_startuponly"
+            ]["arti_hspool_background_start_on_demand"]
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolbgondemand_hsdirextendcap2500ms_startuponly"
+            ]["arti_hspool_client_hsdir_extend_timeout_cap_ms"],
+            2500,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolbgondemand_hsdirextendcap2500ms_startuponly"
+            ]["arti_hspool_client_hsdir_extend_timeout_cap_startup_only"]
+        )
+        self.assertTrue(
+            profiles["arti_release_browser_hsdescshare_hspoolrace150ms"][
+                "arti_hs_desc_shared_cache"
+            ]
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_hsdescshare_hspoolrace150ms"][
+                "arti_hspool_on_demand_race_ms"
+            ],
+            150,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand"
+            ]["arti_hs_desc_shared_cache"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand"
+            ]["arti_hspool_background_start_on_demand"]
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand"
+            ]["arti_hspool_on_demand_race_ms"],
+            150,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hspoolbgbuildcap3000ms"
+            ]["arti_hs_desc_shared_cache"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hspoolbgbuildcap3000ms"
+            ]["arti_hspool_background_start_on_demand"]
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hspoolbgbuildcap3000ms"
+            ]["arti_hspool_on_demand_race_ms"],
+            150,
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hspoolbgbuildcap3000ms"
+            ]["arti_hspool_background_build_timeout_cap_ms"],
+            3000,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hsdirextendcap2500ms"
+            ]["arti_hs_desc_shared_cache"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hsdirextendcap2500ms"
+            ]["arti_hspool_background_start_on_demand"]
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hsdirextendcap2500ms"
+            ]["arti_hspool_on_demand_race_ms"],
+            150,
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hsdirextendcap2500ms"
+            ]["arti_hspool_client_hsdir_extend_timeout_cap_ms"],
+            2500,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hsdirextendcap2000ms_hspoolguarded4_deferpostboot"
+            ]["arti_hs_desc_shared_cache"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hsdirextendcap2000ms_hspoolguarded4_deferpostboot"
+            ]["arti_hspool_background_start_on_demand"]
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hsdirextendcap2000ms_hspoolguarded4_deferpostboot"
+            ]["arti_hspool_on_demand_race_ms"],
+            150,
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hsdirextendcap2000ms_hspoolguarded4_deferpostboot"
+            ]["arti_hspool_client_hsdir_extend_timeout_cap_ms"],
+            2000,
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hsdirextendcap2000ms_hspoolguarded4_deferpostboot"
+            ]["arti_hspool_guarded_stem_target"],
+            4,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hsdirextendcap2000ms_hspoolguarded4_deferpostboot"
+            ]["arti_hspool_guarded_stem_target_defer_post_boot"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hsintrohedge500ms"
+            ]["arti_hs_desc_shared_cache"]
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hsintrohedge500ms"
+            ]["arti_hspool_background_start_on_demand"]
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hsintrohedge500ms"
+            ]["arti_hspool_on_demand_race_ms"],
+            150,
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolbgondemand_hsintrohedge500ms"
+            ]["arti_hs_intro_circuit_hedge_ms"],
+            500,
+        )
+        self.assertTrue(
+            profiles["arti_release_browser_hsdescshare_hspoolrace150ms_hspoolstart5000ms"][
+                "arti_hs_desc_shared_cache"
+            ]
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_hsdescshare_hspoolrace150ms_hspoolstart5000ms"][
+                "arti_hspool_on_demand_race_ms"
+            ],
+            150,
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_hsdescshare_hspoolrace150ms_hspoolstart5000ms"][
+                "arti_hspool_background_start_delay_ms"
+            ],
+            5000,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolstart5000ms_hspoollaunch2"
+            ]["arti_hs_desc_shared_cache"]
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolstart5000ms_hspoollaunch2"
+            ]["arti_hspool_on_demand_race_ms"],
+            150,
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolstart5000ms_hspoollaunch2"
+            ]["arti_hspool_background_start_delay_ms"],
+            5000,
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolstart5000ms_hspoollaunch2"
+            ]["arti_hspool_launch_parallelism"],
+            2,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolstart5000ms_hspoolguarded4_deferpostboot"
+            ]["arti_hs_desc_shared_cache"]
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolstart5000ms_hspoolguarded4_deferpostboot"
+            ]["arti_hspool_on_demand_race_ms"],
+            150,
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolstart5000ms_hspoolguarded4_deferpostboot"
+            ]["arti_hspool_background_start_delay_ms"],
+            5000,
+        )
+        self.assertEqual(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolstart5000ms_hspoolguarded4_deferpostboot"
+            ]["arti_hspool_guarded_stem_target"],
+            4,
+        )
+        self.assertTrue(
+            profiles[
+                "arti_release_browser_hsdescshare_hspoolrace150ms_hspoolstart5000ms_hspoolguarded4_deferpostboot"
+            ]["arti_hspool_guarded_stem_target_defer_post_boot"]
         )
         self.assertEqual(
             profiles["arti_release_browser_exit1"]["arti_socks_connect_soft_timeout_ms"],
@@ -6051,6 +7232,67 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
             load_aware_partial_retry_chunk_bad_health_gate[
                 "arti_exit_select_load_aware"
             ]
+        )
+        partial_retry_chunk_bad_health_gate = profiles[
+            "arti_release_browser_"
+            "mdsrcspreadpendingearlyusable_partialretrychunk_"
+            "badhealthgate5000ms_assigned5_active3"
+        ]
+        self.assertTrue(
+            partial_retry_chunk_bad_health_gate[
+                "arti_dir_microdesc_early_usable_notify"
+            ]
+        )
+        self.assertTrue(
+            partial_retry_chunk_bad_health_gate[
+                "arti_dir_microdesc_partial_retry_chunking"
+            ]
+        )
+        self.assertEqual(
+            partial_retry_chunk_bad_health_gate[
+                "arti_dir_microdesc_bad_health_replacement_suppress_gap_ms"
+            ],
+            5000,
+        )
+        self.assertEqual(
+            partial_retry_chunk_bad_health_gate[
+                "arti_dir_microdesc_bad_health_replacement_suppress_min_assigned_streams"
+            ],
+            5,
+        )
+        self.assertEqual(
+            partial_retry_chunk_bad_health_gate[
+                "arti_dir_microdesc_bad_health_replacement_suppress_min_active_streams"
+            ],
+            3,
+        )
+        self.assertTrue(
+            partial_retry_chunk_bad_health_gate[
+                "arti_dir_microdesc_source_spread"
+            ]
+        )
+        self.assertTrue(
+            partial_retry_chunk_bad_health_gate[
+                "arti_dir_microdesc_pending_spread"
+            ]
+        )
+        self.assertEqual(
+            partial_retry_chunk_bad_health_gate[
+                "arti_dir_microdesc_retry_ids_per_request"
+            ],
+            250,
+        )
+        self.assertEqual(
+            partial_retry_chunk_bad_health_gate[
+                "arti_dir_microdesc_retry_delay_max_ms"
+            ],
+            500,
+        )
+        self.assertFalse(
+            partial_retry_chunk_bad_health_gate["arti_exit_select_load_aware"]
+        )
+        self.assertFalse(
+            partial_retry_chunk_bad_health_gate["arti_exit_select_health_aware"]
         )
         partial_retry_chunk = profiles[
             "arti_release_browser_"
@@ -6667,6 +7909,47 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
         )
         self.assertTrue(
             guarded_prefer_cold_sameiso_prewarm["benchmarks"][
+                "https://check.torproject.org/"
+            ]["summary"]["ok"]
+        )
+        healthaware_prefer_cold_sameiso_prewarm = profiles[
+            "arti_release_browser_healthaware_sameiso2_prefercold_prewarmfirst"
+        ]
+        self.assertTrue(
+            healthaware_prefer_cold_sameiso_prewarm["arti_exit_select_load_aware"]
+        )
+        self.assertTrue(
+            healthaware_prefer_cold_sameiso_prewarm["arti_exit_select_health_aware"]
+        )
+        self.assertFalse(
+            healthaware_prefer_cold_sameiso_prewarm[
+                "arti_exit_select_avoid_bad_health"
+            ]
+        )
+        self.assertEqual(
+            healthaware_prefer_cold_sameiso_prewarm[
+                "arti_exit_same_isolation_target"
+            ],
+            2,
+        )
+        self.assertEqual(
+            healthaware_prefer_cold_sameiso_prewarm[
+                "arti_exit_same_isolation_pending_wait_ms"
+            ],
+            800,
+        )
+        self.assertTrue(
+            healthaware_prefer_cold_sameiso_prewarm[
+                "arti_exit_same_isolation_prewarm_first_stream"
+            ]
+        )
+        self.assertTrue(
+            healthaware_prefer_cold_sameiso_prewarm[
+                "arti_exit_select_prefer_cold_same_isolation"
+            ]
+        )
+        self.assertTrue(
+            healthaware_prefer_cold_sameiso_prewarm["benchmarks"][
                 "https://check.torproject.org/"
             ]["summary"]["ok"]
         )
@@ -7648,6 +8931,89 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
             profile["benchmarks"]["https://check.torproject.org/"]["summary"]["ok"]
         )
 
+    def test_main_passes_no_load_partial_retry_chunk_bad_health_gate_to_interleaved_runner(
+        self,
+    ) -> None:
+        captured_kwargs = {}
+
+        def fake_run_interleaved_profiles(**kwargs):
+            captured_kwargs.update(kwargs)
+            return {
+                "bundled_c_tor_browser": {"skipped": True},
+                "local_c_tor_browser": {"skipped": True},
+                "arti_release_browser": {"skipped": True},
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            browser = root / "firefox"
+            bundled = root / "bundled-tor"
+            local = root / "tor"
+            arti = root / "arti"
+            for path in (browser, bundled, local, arti):
+                path.write_text("", encoding="utf-8")
+
+            argv = [
+                "run_browser_compare.py",
+                "--browser-bin",
+                str(browser),
+                "--bundled-tor-bin",
+                str(bundled),
+                "--tor-bin",
+                str(local),
+                "--arti-bin",
+                str(arti),
+                "--schedule",
+                "interleaved",
+                "--targets",
+                "https://check.torproject.org/",
+                "--runs",
+                "1",
+                "--skip-bundled-tor",
+                "--skip-local-c-tor",
+                "--skip-plain-arti",
+                "--extra-arti-dir-microdesc-source-spread-pending-spread-early-usable-partial-retry-chunking-bad-health-replacement-gate",
+                "5000:5:3",
+            ]
+
+            old_cwd = os.getcwd()
+            os.chdir(root)
+            try:
+                with (
+                    patch("sys.argv", argv),
+                    patch("sys.stdout", new_callable=io.StringIO),
+                    patch("run_browser_compare.run_version", return_value="test"),
+                    patch("run_browser_compare.binary_info", side_effect=lambda path: {"path": str(path), "exists": True, "version": "test"}),
+                    patch("run_browser_compare.detect_source_tweaks", return_value={}),
+                    patch(
+                        "run_browser_compare.read_browser_default_prefs",
+                        return_value={"ok": True, "prefs": REQUIRED_DEFAULT_PREFS},
+                    ),
+                    patch(
+                        "run_browser_compare.validate_default_prefs",
+                        return_value={"ok": True, "failures": []},
+                    ),
+                    patch(
+                        "run_browser_compare.collect_no_marionette_fingerprint_snapshot",
+                        return_value={"ok": True},
+                    ),
+                    patch(
+                        "run_browser_compare.run_interleaved_profiles",
+                        side_effect=fake_run_interleaved_profiles,
+                    ),
+                ):
+                    exit_code = run_browser_compare_main()
+            finally:
+                os.chdir(old_cwd)
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            captured_kwargs[
+                "extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_partial_retry_chunking_bad_health_replacement_gate_combos"
+            ],
+            [(5000, 5, 3)],
+        )
+
     def test_interleaved_schedule_can_add_extra_assigned_cap_profile(self) -> None:
         calls = []
 
@@ -8114,6 +9480,151 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
             "disabled by --skip-bundled-tor",
         )
 
+    def test_interleaved_schedule_can_skip_local_c_tor(self) -> None:
+        calls = []
+
+        def fake_browser_once(**kwargs):
+            calls.append(kwargs["port"])
+            return {
+                "ok": True,
+                "elapsed_ms": 1000 + len(calls),
+                "load_ms": 800 + len(calls),
+                "screenshot": {"bytes": 100},
+                "performance_timing": {},
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            browser = root / "firefox"
+            bundled = root / "bundled-tor"
+            local = root / "tor"
+            arti = root / "arti"
+            for path in (browser, bundled, local, arti):
+                path.write_text("", encoding="utf-8")
+
+            with (
+                patch(
+                    "run_browser_compare.warmup_proxy",
+                    return_value={"ok": True, "seconds": 0.1},
+                ),
+                patch(
+                    "run_browser_compare.start_proxy_for_spec",
+                    return_value=(object(), queue.Queue()),
+                ),
+                patch(
+                    "run_browser_compare.wait_for_line",
+                    return_value={"ok": True, "seconds": 0.2},
+                ),
+                patch("run_browser_compare.stop_process"),
+                patch("run_browser_compare.read_torrc_quality", return_value={}),
+                patch("run_browser_compare.run_browser_once", side_effect=fake_browser_once),
+            ):
+                profiles = run_interleaved_profiles(
+                    bundled_tor_bin=bundled,
+                    tor_bin=local,
+                    arti_bin=arti,
+                    ports={
+                        "bundled_c_tor_browser": 19080,
+                        "local_c_tor_browser": 19081,
+                        "arti_release_browser": 19082,
+                    },
+                    output_dir=root / "out",
+                    browser_bin=browser,
+                    targets=["https://check.torproject.org/"],
+                    runs=1,
+                    timeout=1.0,
+                    window_size="1000,1000",
+                    warm_cache=True,
+                    include_bundled_tor=False,
+                    include_local_c_tor=False,
+                )
+
+        self.assertEqual(calls, [19082])
+        self.assertTrue(profiles["local_c_tor_browser"]["skipped"])
+        self.assertEqual(
+            profiles["local_c_tor_browser"]["reason"],
+            "disabled by --skip-local-c-tor",
+        )
+
+    def test_interleaved_schedule_can_skip_plain_arti_and_keep_extra_arti(self) -> None:
+        calls = []
+
+        def fake_browser_once(**kwargs):
+            calls.append((kwargs["port"], kwargs["run_index"]))
+            return {
+                "ok": True,
+                "elapsed_ms": 1000 + len(calls),
+                "load_ms": 800 + len(calls),
+                "screenshot": {"bytes": 100},
+                "performance_timing": {},
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            browser = root / "firefox"
+            bundled = root / "bundled-tor"
+            local = root / "tor"
+            arti = root / "arti"
+            flowctl = root / "arti-flowctl"
+            for path in (browser, bundled, local, arti, flowctl):
+                path.write_text("", encoding="utf-8")
+
+            with (
+                patch(
+                    "run_browser_compare.warmup_proxy",
+                    return_value={"ok": True, "seconds": 0.1},
+                ),
+                patch(
+                    "run_browser_compare.start_proxy_for_spec",
+                    return_value=(object(), queue.Queue()),
+                ),
+                patch(
+                    "run_browser_compare.wait_for_line",
+                    return_value={"ok": True, "seconds": 0.2},
+                ),
+                patch("run_browser_compare.stop_process"),
+                patch("run_browser_compare.read_torrc_quality", return_value={}),
+                patch(
+                    "run_browser_compare.binary_info",
+                    side_effect=lambda path: {"path": str(path), "exists": True},
+                ),
+                patch("run_browser_compare.run_browser_once", side_effect=fake_browser_once),
+            ):
+                profiles = run_interleaved_profiles(
+                    bundled_tor_bin=bundled,
+                    tor_bin=local,
+                    arti_bin=arti,
+                    ports={
+                        "bundled_c_tor_browser": 19080,
+                        "local_c_tor_browser": 19081,
+                        "arti_release_browser": 19082,
+                    },
+                    output_dir=root / "out",
+                    browser_bin=browser,
+                    targets=["https://check.torproject.org/"],
+                    runs=1,
+                    timeout=1.0,
+                    window_size="1000,1000",
+                    warm_cache=True,
+                    include_bundled_tor=False,
+                    include_plain_arti=False,
+                    extra_arti_bins=[
+                        ("arti_release_browser_flowctl", flowctl.resolve())
+                    ],
+                    extra_arti_port_start=19083,
+                )
+
+        self.assertEqual(calls, [(19081, 1), (19083, 1)])
+        self.assertTrue(profiles["arti_release_browser"]["skipped"])
+        self.assertEqual(
+            profiles["arti_release_browser"]["reason"],
+            "disabled by --skip-plain-arti",
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_flowctl"]["arti_bin"],
+            str(flowctl.resolve()),
+        )
+
     def test_interleaved_schedule_can_add_extra_arti_binary(self) -> None:
         calls = []
 
@@ -8264,6 +9775,710 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
             2,
         )
 
+    def test_interleaved_schedule_can_add_extra_hsdescshare_scheduler_burst_profile(
+        self,
+    ) -> None:
+        calls = []
+
+        def fake_browser_once(**kwargs):
+            calls.append((kwargs["port"], kwargs["run_index"]))
+            return {
+                "ok": True,
+                "elapsed_ms": 1000 + len(calls),
+                "load_ms": 800 + len(calls),
+                "screenshot": {"bytes": 100},
+                "performance_timing": {},
+            }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            browser = root / "firefox"
+            bundled = root / "bundled-tor"
+            local = root / "tor"
+            arti = root / "arti"
+            for path in (browser, bundled, local, arti):
+                path.write_text("", encoding="utf-8")
+
+            with (
+                patch(
+                    "run_browser_compare.warmup_proxy",
+                    return_value={"ok": True, "seconds": 0.1},
+                ),
+                patch(
+                    "run_browser_compare.start_proxy_for_spec",
+                    return_value=(object(), queue.Queue()),
+                ),
+                patch(
+                    "run_browser_compare.wait_for_line",
+                    return_value={"ok": True, "seconds": 0.2},
+                ),
+                patch("run_browser_compare.stop_process"),
+                patch("run_browser_compare.read_torrc_quality", return_value={}),
+                patch(
+                    "run_browser_compare.run_browser_once",
+                    side_effect=fake_browser_once,
+                ),
+            ):
+                profiles = run_interleaved_profiles(
+                    bundled_tor_bin=bundled,
+                    tor_bin=local,
+                    arti_bin=arti,
+                    ports={
+                        "bundled_c_tor_browser": 19080,
+                        "local_c_tor_browser": 19081,
+                        "arti_release_browser": 19082,
+                    },
+                    output_dir=root / "out",
+                    browser_bin=browser,
+                    targets=["https://check.torproject.org/"],
+                    runs=1,
+                    timeout=1.0,
+                    window_size="1000,1000",
+                    warm_cache=True,
+                    include_bundled_tor=False,
+                    extra_arti_hs_desc_shared_cache_stream_scheduler_burst=[2],
+                    extra_arti_port_start=19083,
+                )
+
+        self.assertEqual(calls, [(19081, 1), (19082, 1), (19083, 1)])
+        self.assertTrue(
+            profiles["arti_release_browser_hsdescshare_schedburst2"][
+                "arti_hs_desc_shared_cache"
+            ]
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_hsdescshare_schedburst2"][
+                "arti_stream_scheduler_burst"
+            ],
+            2,
+        )
+
+    def test_interleaved_schedule_can_add_extra_hsdescshare_stream_ready_data_coalesce_profile(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            browser = root / "Browser.app"
+            bundled = root / "bundled-tor"
+            local = root / "local-tor"
+            arti = root / "arti"
+            for path in (browser, bundled, local, arti):
+                path.write_text("")
+            calls: list[tuple[int, int]] = []
+
+            def fake_browser_once(**kwargs: object) -> dict[str, object]:
+                calls.append((int(kwargs["port"]), int(kwargs["run_index"])))
+                return {
+                    "ok": True,
+                    "elapsed_ms": 1000 + len(calls),
+                    "load_ms": 800 + len(calls),
+                    "screenshot": {"bytes": 100},
+                    "performance_timing": {},
+                }
+
+            with (
+                patch(
+                    "run_browser_compare.warmup_proxy",
+                    return_value={"ok": True, "seconds": 0.1},
+                ),
+                patch(
+                    "run_browser_compare.start_proxy_for_spec",
+                    return_value=(object(), queue.Queue()),
+                ),
+                patch(
+                    "run_browser_compare.wait_for_line",
+                    return_value={"ok": True, "seconds": 0.2},
+                ),
+                patch("run_browser_compare.stop_process"),
+                patch("run_browser_compare.read_torrc_quality", return_value={}),
+                patch(
+                    "run_browser_compare.run_browser_once",
+                    side_effect=fake_browser_once,
+                ),
+            ):
+                profiles = run_interleaved_profiles(
+                    bundled_tor_bin=bundled,
+                    tor_bin=local,
+                    arti_bin=arti,
+                    ports={
+                        "bundled_c_tor_browser": 19080,
+                        "local_c_tor_browser": 19081,
+                        "arti_release_browser": 19082,
+                    },
+                    output_dir=root / "out",
+                    browser_bin=browser,
+                    targets=["https://check.torproject.org/"],
+                    runs=1,
+                    timeout=1.0,
+                    window_size="1000,1000",
+                    warm_cache=True,
+                    include_bundled_tor=False,
+                    extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_bytes=[
+                        4096
+                    ],
+                    extra_arti_port_start=19083,
+                )
+
+        self.assertEqual(calls, [(19081, 1), (19082, 1), (19083, 1)])
+        self.assertTrue(
+            profiles["arti_release_browser_hsdescshare_streamreadycoalesce4096"][
+                "arti_hs_desc_shared_cache"
+            ]
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_hsdescshare_streamreadycoalesce4096"][
+                "arti_stream_ready_data_coalesce_bytes"
+            ],
+            4096,
+        )
+
+    def test_interleaved_schedule_can_add_extra_hsdescshare_reuse_max_active_streams_profile(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            browser = root / "Browser.app"
+            bundled = root / "bundled-tor"
+            local = root / "local-tor"
+            arti = root / "arti"
+            for path in (browser, bundled, local, arti):
+                path.write_text("")
+            calls: list[tuple[int, int]] = []
+
+            def fake_browser_once(**kwargs: object) -> dict[str, object]:
+                calls.append((int(kwargs["port"]), int(kwargs["run_index"])))
+                return {
+                    "ok": True,
+                    "elapsed_ms": 1000 + len(calls),
+                    "load_ms": 800 + len(calls),
+                    "screenshot": {"bytes": 100},
+                    "performance_timing": {},
+                }
+
+            with (
+                patch(
+                    "run_browser_compare.warmup_proxy",
+                    return_value={"ok": True, "seconds": 0.1},
+                ),
+                patch(
+                    "run_browser_compare.start_proxy_for_spec",
+                    return_value=(object(), queue.Queue()),
+                ),
+                patch(
+                    "run_browser_compare.wait_for_line",
+                    return_value={"ok": True, "seconds": 0.2},
+                ),
+                patch("run_browser_compare.stop_process"),
+                patch("run_browser_compare.read_torrc_quality", return_value={}),
+                patch(
+                    "run_browser_compare.run_browser_once",
+                    side_effect=fake_browser_once,
+                ),
+            ):
+                profiles = run_interleaved_profiles(
+                    bundled_tor_bin=bundled,
+                    tor_bin=local,
+                    arti_bin=arti,
+                    ports={
+                        "bundled_c_tor_browser": 19080,
+                        "local_c_tor_browser": 19081,
+                        "arti_release_browser": 19082,
+                    },
+                    output_dir=root / "out",
+                    browser_bin=browser,
+                    targets=["https://check.torproject.org/"],
+                    runs=1,
+                    timeout=1.0,
+                    window_size="1000,1000",
+                    warm_cache=True,
+                    include_bundled_tor=False,
+                    extra_arti_hs_desc_shared_cache_reuse_max_active_streams=[
+                        2
+                    ],
+                    extra_arti_port_start=19083,
+                )
+
+        self.assertEqual(calls, [(19081, 1), (19082, 1), (19083, 1)])
+        self.assertTrue(
+            profiles["arti_release_browser_hsdescshare_hsreuseactive2"][
+                "arti_hs_desc_shared_cache"
+            ]
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_hsdescshare_hsreuseactive2"][
+                "arti_hs_state_reuse_max_active_streams"
+            ],
+            2,
+        )
+
+    def test_interleaved_schedule_can_add_extra_hsdescshare_socks_tor_to_client_coalesce_profile(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            browser = root / "Browser.app"
+            bundled = root / "bundled-tor"
+            local = root / "local-tor"
+            arti = root / "arti"
+            for path in (browser, bundled, local, arti):
+                path.write_text("")
+            calls: list[tuple[int, int]] = []
+
+            def fake_browser_once(**kwargs: object) -> dict[str, object]:
+                calls.append((int(kwargs["port"]), int(kwargs["run_index"])))
+                return {
+                    "ok": True,
+                    "elapsed_ms": 1000 + len(calls),
+                    "load_ms": 800 + len(calls),
+                    "screenshot": {"bytes": 100},
+                    "performance_timing": {},
+                }
+
+            with (
+                patch(
+                    "run_browser_compare.warmup_proxy",
+                    return_value={"ok": True, "seconds": 0.1},
+                ),
+                patch(
+                    "run_browser_compare.start_proxy_for_spec",
+                    return_value=(object(), queue.Queue()),
+                ),
+                patch(
+                    "run_browser_compare.wait_for_line",
+                    return_value={"ok": True, "seconds": 0.2},
+                ),
+                patch("run_browser_compare.stop_process"),
+                patch("run_browser_compare.read_torrc_quality", return_value={}),
+                patch(
+                    "run_browser_compare.run_browser_once",
+                    side_effect=fake_browser_once,
+                ),
+            ):
+                profiles = run_interleaved_profiles(
+                    bundled_tor_bin=bundled,
+                    tor_bin=local,
+                    arti_bin=arti,
+                    ports={
+                        "bundled_c_tor_browser": 19080,
+                        "local_c_tor_browser": 19081,
+                        "arti_release_browser": 19082,
+                    },
+                    output_dir=root / "out",
+                    browser_bin=browser,
+                    targets=["https://check.torproject.org/"],
+                    runs=1,
+                    timeout=1.0,
+                    window_size="1000,1000",
+                    warm_cache=True,
+                    include_bundled_tor=False,
+                    extra_arti_hs_desc_shared_cache_socks_tor_to_client_coalesce_bytes=[
+                        4096
+                    ],
+                    extra_arti_port_start=19083,
+                )
+
+        self.assertEqual(calls, [(19081, 1), (19082, 1), (19083, 1)])
+        self.assertTrue(
+            profiles["arti_release_browser_hsdescshare_torclientcoalesce4096"][
+                "arti_hs_desc_shared_cache"
+            ]
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_hsdescshare_torclientcoalesce4096"][
+                "arti_socks_tor_to_client_coalesce_bytes"
+            ],
+            4096,
+        )
+
+    def test_interleaved_schedule_can_add_extra_hsdescshare_rendezvous_establish_timeout_floor_profile(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            browser = root / "Browser.app"
+            bundled = root / "bundled-tor"
+            local = root / "local-tor"
+            arti = root / "arti"
+            for path in (browser, bundled, local, arti):
+                path.write_text("")
+            calls: list[tuple[int, int]] = []
+
+            def fake_browser_once(**kwargs: object) -> dict[str, object]:
+                calls.append((int(kwargs["port"]), int(kwargs["run_index"])))
+                return {
+                    "ok": True,
+                    "elapsed_ms": 1000 + len(calls),
+                    "load_ms": 800 + len(calls),
+                    "screenshot": {"bytes": 100},
+                    "performance_timing": {},
+                }
+
+            with (
+                patch(
+                    "run_browser_compare.warmup_proxy",
+                    return_value={"ok": True, "seconds": 0.1},
+                ),
+                patch(
+                    "run_browser_compare.start_proxy_for_spec",
+                    return_value=(object(), queue.Queue()),
+                ),
+                patch(
+                    "run_browser_compare.wait_for_line",
+                    return_value={"ok": True, "seconds": 0.2},
+                ),
+                patch("run_browser_compare.stop_process"),
+                patch("run_browser_compare.read_torrc_quality", return_value={}),
+                patch(
+                    "run_browser_compare.run_browser_once",
+                    side_effect=fake_browser_once,
+                ),
+            ):
+                profiles = run_interleaved_profiles(
+                    bundled_tor_bin=bundled,
+                    tor_bin=local,
+                    arti_bin=arti,
+                    ports={
+                        "bundled_c_tor_browser": 19080,
+                        "local_c_tor_browser": 19081,
+                        "arti_release_browser": 19082,
+                    },
+                    output_dir=root / "out",
+                    browser_bin=browser,
+                    targets=["https://check.torproject.org/"],
+                    runs=1,
+                    timeout=1.0,
+                    window_size="1000,1000",
+                    warm_cache=True,
+                    include_bundled_tor=False,
+                    extra_arti_hs_desc_shared_cache_rendezvous_establish_timeout_floor_ms=[
+                        1500
+                    ],
+                    extra_arti_port_start=19083,
+                )
+
+        self.assertEqual(calls, [(19081, 1), (19082, 1), (19083, 1)])
+        profile = profiles["arti_release_browser_hsdescshare_rendfloor1500ms"]
+        self.assertTrue(profile["arti_hs_desc_shared_cache"])
+        self.assertEqual(
+            profile["arti_hs_rendezvous_establish_timeout_floor_ms"], 1500
+        )
+
+    def test_interleaved_schedule_can_add_extra_hsdescshare_stream_ready_data_coalesce_min_hop_profile(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            browser = root / "Browser.app"
+            bundled = root / "bundled-tor"
+            local = root / "local-tor"
+            arti = root / "arti"
+            for path in (browser, bundled, local, arti):
+                path.write_text("")
+            calls: list[tuple[int, int]] = []
+
+            def fake_browser_once(**kwargs: object) -> dict[str, object]:
+                calls.append((int(kwargs["port"]), int(kwargs["run_index"])))
+                return {
+                    "ok": True,
+                    "elapsed_ms": 1000 + len(calls),
+                    "load_ms": 800 + len(calls),
+                    "screenshot": {"bytes": 100},
+                    "performance_timing": {},
+                }
+
+            with (
+                patch(
+                    "run_browser_compare.warmup_proxy",
+                    return_value={"ok": True, "seconds": 0.1},
+                ),
+                patch(
+                    "run_browser_compare.start_proxy_for_spec",
+                    return_value=(object(), queue.Queue()),
+                ),
+                patch(
+                    "run_browser_compare.wait_for_line",
+                    return_value={"ok": True, "seconds": 0.2},
+                ),
+                patch("run_browser_compare.stop_process"),
+                patch("run_browser_compare.read_torrc_quality", return_value={}),
+                patch(
+                    "run_browser_compare.run_browser_once",
+                    side_effect=fake_browser_once,
+                ),
+            ):
+                profiles = run_interleaved_profiles(
+                    bundled_tor_bin=bundled,
+                    tor_bin=local,
+                    arti_bin=arti,
+                    ports={
+                        "bundled_c_tor_browser": 19080,
+                        "local_c_tor_browser": 19081,
+                        "arti_release_browser": 19082,
+                    },
+                    output_dir=root / "out",
+                    browser_bin=browser,
+                    targets=["https://check.torproject.org/"],
+                    runs=1,
+                    timeout=1.0,
+                    window_size="1000,1000",
+                    warm_cache=True,
+                    include_bundled_tor=False,
+                    extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos=[
+                        (4096, 4)
+                    ],
+                    extra_arti_port_start=19083,
+                )
+
+        self.assertEqual(calls, [(19081, 1), (19082, 1), (19083, 1)])
+        self.assertTrue(
+            profiles["arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4"][
+                "arti_hs_desc_shared_cache"
+            ]
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4"][
+                "arti_stream_ready_data_coalesce_bytes"
+            ],
+            4096,
+        )
+        self.assertEqual(
+            profiles["arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4"][
+                "arti_stream_ready_data_coalesce_min_hop"
+            ],
+            4,
+        )
+
+    def test_interleaved_schedule_can_add_extra_hsdescshare_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_profile(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            browser = root / "Browser.app"
+            bundled = root / "bundled-tor"
+            local = root / "local-tor"
+            arti = root / "arti"
+            for path in (browser, bundled, local, arti):
+                path.write_text("")
+            calls: list[tuple[int, int]] = []
+
+            def fake_browser_once(**kwargs: object) -> dict[str, object]:
+                calls.append((int(kwargs["port"]), int(kwargs["run_index"])))
+                return {
+                    "ok": True,
+                    "elapsed_ms": 1000 + len(calls),
+                    "load_ms": 800 + len(calls),
+                    "screenshot": {"bytes": 100},
+                    "performance_timing": {},
+                }
+
+            with (
+                patch(
+                    "run_browser_compare.warmup_proxy",
+                    return_value={"ok": True, "seconds": 0.1},
+                ),
+                patch(
+                    "run_browser_compare.start_proxy_for_spec",
+                    return_value=(object(), queue.Queue()),
+                ),
+                patch(
+                    "run_browser_compare.wait_for_line",
+                    return_value={"ok": True, "seconds": 0.2},
+                ),
+                patch("run_browser_compare.stop_process"),
+                patch("run_browser_compare.read_torrc_quality", return_value={}),
+                patch(
+                    "run_browser_compare.run_browser_once",
+                    side_effect=fake_browser_once,
+                ),
+            ):
+                profiles = run_interleaved_profiles(
+                    bundled_tor_bin=bundled,
+                    tor_bin=local,
+                    arti_bin=arti,
+                    ports={
+                        "bundled_c_tor_browser": 19080,
+                        "local_c_tor_browser": 19081,
+                        "arti_release_browser": 19082,
+                    },
+                    output_dir=root / "out",
+                    browser_bin=browser,
+                    targets=["https://check.torproject.org/"],
+                    runs=1,
+                    timeout=1.0,
+                    window_size="1000,1000",
+                    warm_cache=True,
+                    include_bundled_tor=False,
+                    extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos=[
+                        (4096, 4, 1500)
+                    ],
+                    extra_arti_port_start=19083,
+                )
+
+        self.assertEqual(calls, [(19081, 1), (19082, 1), (19083, 1)])
+        profile = profiles[
+            "arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4rendfloor1500ms"
+        ]
+        self.assertTrue(profile["arti_hs_desc_shared_cache"])
+        self.assertEqual(profile["arti_stream_ready_data_coalesce_bytes"], 4096)
+        self.assertEqual(profile["arti_stream_ready_data_coalesce_min_hop"], 4)
+        self.assertEqual(
+            profile["arti_hs_rendezvous_establish_timeout_floor_ms"], 1500
+        )
+
+    def test_interleaved_schedule_can_add_extra_hsdescshare_stream_ready_data_coalesce_min_hop_start_backlog_profile(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            browser = root / "Browser.app"
+            bundled = root / "bundled-tor"
+            local = root / "local-tor"
+            arti = root / "arti"
+            for path in (browser, bundled, local, arti):
+                path.write_text("")
+            calls: list[tuple[int, int]] = []
+
+            def fake_browser_once(**kwargs: object) -> dict[str, object]:
+                calls.append((int(kwargs["port"]), int(kwargs["run_index"])))
+                return {
+                    "ok": True,
+                    "elapsed_ms": 1000 + len(calls),
+                    "load_ms": 800 + len(calls),
+                    "screenshot": {"bytes": 100},
+                    "performance_timing": {},
+                }
+
+            with (
+                patch(
+                    "run_browser_compare.warmup_proxy",
+                    return_value={"ok": True, "seconds": 0.1},
+                ),
+                patch(
+                    "run_browser_compare.start_proxy_for_spec",
+                    return_value=(object(), queue.Queue()),
+                ),
+                patch(
+                    "run_browser_compare.wait_for_line",
+                    return_value={"ok": True, "seconds": 0.2},
+                ),
+                patch("run_browser_compare.stop_process"),
+                patch("run_browser_compare.read_torrc_quality", return_value={}),
+                patch(
+                    "run_browser_compare.run_browser_once",
+                    side_effect=fake_browser_once,
+                ),
+            ):
+                profiles = run_interleaved_profiles(
+                    bundled_tor_bin=bundled,
+                    tor_bin=local,
+                    arti_bin=arti,
+                    ports={
+                        "bundled_c_tor_browser": 19080,
+                        "local_c_tor_browser": 19081,
+                        "arti_release_browser": 19082,
+                    },
+                    output_dir=root / "out",
+                    browser_bin=browser,
+                    targets=["https://check.torproject.org/"],
+                    runs=1,
+                    timeout=1.0,
+                    window_size="1000,1000",
+                    warm_cache=True,
+                    include_bundled_tor=False,
+                    extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos=[
+                        (4096, 4, 1494)
+                    ],
+                    extra_arti_port_start=19083,
+                )
+
+        self.assertEqual(calls, [(19081, 1), (19082, 1), (19083, 1)])
+        profile = profiles[
+            "arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4backlog1494"
+        ]
+        self.assertTrue(profile["arti_hs_desc_shared_cache"])
+        self.assertEqual(profile["arti_stream_ready_data_coalesce_bytes"], 4096)
+        self.assertEqual(profile["arti_stream_ready_data_coalesce_min_hop"], 4)
+        self.assertEqual(
+            profile["arti_stream_ready_data_coalesce_start_backlog_bytes"], 1494
+        )
+
+    def test_interleaved_schedule_can_add_extra_hsdescshare_stream_ready_data_coalesce_min_hop_busy_max_profile(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            browser = root / "Browser.app"
+            bundled = root / "bundled-tor"
+            local = root / "local-tor"
+            arti = root / "arti"
+            for path in (browser, bundled, local, arti):
+                path.write_text("")
+            calls: list[tuple[int, int]] = []
+
+            def fake_browser_once(**kwargs: object) -> dict[str, object]:
+                calls.append((int(kwargs["port"]), int(kwargs["run_index"])))
+                return {
+                    "ok": True,
+                    "elapsed_ms": 1000 + len(calls),
+                    "load_ms": 800 + len(calls),
+                    "screenshot": {"bytes": 100},
+                    "performance_timing": {},
+                }
+
+            with (
+                patch(
+                    "run_browser_compare.warmup_proxy",
+                    return_value={"ok": True, "seconds": 0.1},
+                ),
+                patch(
+                    "run_browser_compare.start_proxy_for_spec",
+                    return_value=(object(), queue.Queue()),
+                ),
+                patch(
+                    "run_browser_compare.wait_for_line",
+                    return_value={"ok": True, "seconds": 0.2},
+                ),
+                patch("run_browser_compare.stop_process"),
+                patch("run_browser_compare.read_torrc_quality", return_value={}),
+                patch(
+                    "run_browser_compare.run_browser_once",
+                    side_effect=fake_browser_once,
+                ),
+            ):
+                profiles = run_interleaved_profiles(
+                    bundled_tor_bin=bundled,
+                    tor_bin=local,
+                    arti_bin=arti,
+                    ports={
+                        "bundled_c_tor_browser": 19080,
+                        "local_c_tor_browser": 19081,
+                        "arti_release_browser": 19082,
+                    },
+                    output_dir=root / "out",
+                    browser_bin=browser,
+                    targets=["https://check.torproject.org/"],
+                    runs=1,
+                    timeout=1.0,
+                    window_size="1000,1000",
+                    warm_cache=True,
+                    include_bundled_tor=False,
+                    extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos=[
+                        (4096, 4, 996)
+                    ],
+                    extra_arti_port_start=19083,
+                )
+
+        self.assertEqual(calls, [(19081, 1), (19082, 1), (19083, 1)])
+        profile = profiles[
+            "arti_release_browser_hsdescshare_streamreadycoalesce4096minhop4busymax996"
+        ]
+        self.assertTrue(profile["arti_hs_desc_shared_cache"])
+        self.assertEqual(profile["arti_stream_ready_data_coalesce_bytes"], 4096)
+        self.assertEqual(profile["arti_stream_ready_data_coalesce_min_hop"], 4)
+        self.assertEqual(
+            profile["arti_stream_ready_data_coalesce_busy_max_bytes"], 996
+        )
+
     def test_counts_proxy_log_signals(self) -> None:
         signals = count_proxy_log_signals(
             [
@@ -8396,6 +10611,34 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
         self.assertEqual(len(boot["lines"]), 3)
         self.assertEqual(len(boot["signal_lines"]), 2)
         self.assertIn("Looking for a consensus", boot["signal_lines"][0])
+        self.assertIn("proxy now functional", boot["signal_lines"][1])
+
+    def test_wait_for_line_keeps_hspool_boot_signal_lines(self) -> None:
+        lines: queue.Queue[str] = queue.Queue()
+        lines.put(
+            "2026-06-09T05:35:40Z DEBUG tor_circmgr::hspool: torfast hspool client hsdir extend timeout decision estimated_timeout_ms=5000 timeout_cap_ms=3000 cap_applied=true"
+        )
+        lines.put(
+            "2026-06-09T05:35:41Z  INFO arti::subcommands::proxy: Sufficiently bootstrapped; proxy now functional."
+        )
+
+        class FakeProcess:
+            returncode = None
+
+            def poll(self):
+                return None
+
+        boot = wait_for_line(
+            FakeProcess(),
+            lines,
+            timeout=1.0,
+            ready_text="proxy now functional",
+            process_name="arti",
+        )
+
+        self.assertTrue(boot["ok"])
+        self.assertEqual(len(boot["signal_lines"]), 2)
+        self.assertIn("torfast hspool client hsdir extend timeout decision", boot["signal_lines"][0])
         self.assertIn("proxy now functional", boot["signal_lines"][1])
 
     def test_interleaved_boot_seconds_are_normalized_from_launch(self) -> None:
@@ -8781,6 +11024,35 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
         self.assertNotIn(matching_late_selection, run["proxy_signal_lines"])
         self.assertNotIn(matching_old_selection, run["proxy_output_tail"])
         self.assertNotIn(matching_old_build, run["proxy_output_tail"])
+
+    def test_record_proxy_run_signals_keeps_pre_run_hspool_timeout_proof(self) -> None:
+        lines: queue.Queue[str] = queue.Queue()
+        old_disable = (
+            "1970-01-01T00:00:00Z INFO tor_circmgr::hspool: "
+            "torfast hspool client hsdir extend timeout cap disabled after bootstrap "
+            "enabled_client_hsdir_requests=0"
+        )
+        in_run_availability = (
+            "1970-01-01T00:00:01Z INFO tor_circmgr::hspool: "
+            "torfast hspool client hsdir extend timeout availability "
+            "cap_enabled=false cap_configured=true cap_startup_only=true "
+            "configured_cap_ms=3000"
+        )
+        lines.put(old_disable)
+        lines.put(in_run_availability)
+        profile: dict[str, object] = {}
+        run: dict[str, object] = {
+            "ok": False,
+            "started_epoch_ms": 1000,
+            "elapsed_ms": 2000,
+        }
+
+        record_proxy_run_signals(profile, run, lines)
+
+        self.assertIn(old_disable, run["proxy_signal_lines"])
+        self.assertIn(in_run_availability, run["proxy_signal_lines"])
+        self.assertIn(old_disable, profile["proxy_signal_lines"])
+        self.assertNotIn(old_disable, run["proxy_output_tail"])
 
     def test_proxy_log_lines_reads_run_level_signal_lines(self) -> None:
         profile = {
@@ -10707,6 +12979,20 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
         self.assertEqual(timings[-1]["last_tor_to_client_write_ms"], 710)
         self.assertEqual(timings[-1]["tor_to_client_write_bytes"], 3400)
         self.assertEqual(socks_first_byte_after_reply_median(timings), 97.0)
+
+    def test_target_label_matches_hostname_accepts_ascii_ellipsis(self) -> None:
+        self.assertTrue(
+            target_label_matches_hostname(
+                "cflareusni3s7vwh...qd.onion",
+                "cflareusni3s7vwh4m5amw6bqgmydtf6vwtk7ntd4jqphh3h3y7z4nqd.onion",
+            )
+        )
+        self.assertFalse(
+            target_label_matches_hostname(
+                "cflareusni3s7vwh...qd.onion",
+                "differentexamplevalueaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion",
+            )
+        )
 
     def test_groups_socks_timings_by_target_kind(self) -> None:
         timings = parse_torfast_socks_timings(
@@ -13346,6 +15632,22 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
                                 {
                                     "run_index": 1,
                                     "ok": True,
+                                    "proxy_signal_lines": [
+                                        f"2026-06-06T23:12:37Z  INFO arti::proxy::socks: torfast socks timing request parsed timing_id=7 target_kind=hostname port=443 conn_started_epoch_ms={base + 105} elapsed_ms=0",
+                                        "2026-06-06T23:12:37Z  INFO tor_circmgr::hspool: torfast hspool timing stem ready kind=ClientIntro stem_kind=GUARDED source=pool elapsed_ms=12",
+                                        "2026-06-06T23:12:37Z  INFO tor_circmgr::hspool: torfast hspool timing stem selected kind=ClientIntro stem_kind=GUARDED elapsed_ms=15",
+                                        "2026-06-06T23:12:38Z  INFO tor_circmgr::hspool: torfast hspool timing specific circuit ready kind=ClientIntro stem_kind=GUARDED extend_ms=44 elapsed_ms=57",
+                                        "2026-06-06T23:12:38Z  INFO tor_hsclient::connect: torfast hs timing rendezvous established timing_id=7 hs_connect_id=24 elapsed_ms=428 connect_elapsed_ms=1777",
+                                        "2026-06-06T23:12:39Z  INFO tor_hsclient::connect: torfast hs timing circuit established timing_id=7 hs_connect_id=24 intro_index=IntroPtIndex(2) elapsed_ms=319 connect_elapsed_ms=2855",
+                                        "2026-06-06T23:12:39Z  INFO tor_hsclient::state: torfast hs state timing connect task finished timing_id=7 state_id=TableIndex(24v1) elapsed_ms=2856 ok=true",
+                                        "2026-06-06T23:12:39Z  INFO tor_hsclient::state: torfast hs state timing tunnel returned timing_id=7 state_id=TableIndex(24v1) elapsed_ms=2856",
+                                        "2026-06-06T23:12:39Z  INFO arti_client::client: torfast hs client timing tunnel ready timing_id=7 port=443 elapsed_ms=2856",
+                                        "2026-06-06T23:12:40Z  INFO arti_client::client: torfast hs client timing begin stream finished timing_id=7 port=443 elapsed_ms=3368 tunnel_elapsed_ms=2856 begin_phase_ms=512 ok=true",
+                                        f"2026-06-06T23:12:40Z  INFO arti::proxy::socks: torfast socks timing stream ready timing_id=7 target_kind=hostname port=443 conn_started_epoch_ms={base + 105} connect_ms=3369 elapsed_ms=3369",
+                                        f"2026-06-06T23:12:40Z  INFO arti::proxy::socks: torfast socks timing stream linked timing_id=7 target_kind=hostname port=443 conn_started_epoch_ms={base + 105} circ_id=Circ 0.4 hop=#4 stream_id=11302 elapsed_ms=3369",
+                                        "2026-06-06T23:12:50Z  INFO tor_circmgr::hspool: torfast hspool timing stem ready kind=ClientIntro stem_kind=NAIVE source=pool elapsed_ms=99",
+                                        "2026-06-06T23:12:50Z  INFO tor_hsclient::connect: torfast hs timing circuit established timing_id=44 hs_connect_id=99 intro_index=IntroPtIndex(1) elapsed_ms=100 connect_elapsed_ms=9000",
+                                    ],
                                     "performance_timing": {
                                         "time_origin_ms": base,
                                         "navigation": {"loadEventEnd": 4000},
@@ -13431,6 +15733,28 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
         self.assertEqual(byte_rows[0]["last_client_cumulative_bytes"], 40)
         self.assertEqual(byte_rows[0]["tor_events_in_gap"], 0)
         self.assertEqual(byte_rows[0]["tor_bytes_in_gap"], 0)
+
+        hs_rows = browser_resource_stream_gap_hs_context_rows(payload)
+
+        self.assertEqual(len(hs_rows), 1)
+        self.assertEqual(hs_rows[0]["timing_id"], 7)
+        self.assertEqual(hs_rows[0]["gap_phase"], "request_wait")
+        self.assertEqual(hs_rows[0]["request_to_stream_ready_ms"], 3369)
+        self.assertEqual(hs_rows[0]["hs_connect_ids"], "24")
+        self.assertEqual(hs_rows[0]["hs_state_ids"], "TableIndex(24v1)")
+        self.assertEqual(hs_rows[0]["hs_shared_cache_hits"], 0)
+        self.assertEqual(hs_rows[0]["hs_rend_established_ms"], 1777)
+        self.assertEqual(hs_rows[0]["hs_circuit_established_ms"], 2855)
+        self.assertEqual(hs_rows[0]["hs_state_task_ms"], 2856)
+        self.assertEqual(hs_rows[0]["hs_tunnel_ms"], 2856)
+        self.assertEqual(hs_rows[0]["hs_begin_phase_ms"], 512)
+        self.assertEqual(hs_rows[0]["hspool_events_in_setup"], 3)
+        self.assertEqual(hs_rows[0]["hspool_stem_kinds"], "GUARDED")
+        self.assertEqual(
+            hs_rows[0]["hspool_event_counts"],
+            "specific_circuit_ready:1, stem_ready:1, stem_selected:1",
+        )
+        self.assertEqual(hs_rows[0]["hspool_max_elapsed_ms"], 57)
 
     def test_arti_profile_top_resource_relay_ab_rows_add_join_context(self) -> None:
         base = int(parse_log_timestamp_ms("2026-06-06T23:12:37Z x") or 0)
@@ -13847,6 +16171,10 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
                 "kind=ClientIntro stem_kind=GUARDED extend_ms=44 elapsed_ms=57 torfast hspool timing specific circuit ready",
                 "kind=ClientIntro stem_kind=GUARDED extend_ms=55 elapsed_ms=68 torfast hspool timing specific circuit failed",
                 "kind=ClientRend stem_kind=GUARDED elapsed_ms=22 torfast hspool timing client rend circuit ready",
+                "2026-06-09T05:35:40Z DEBUG tor_circmgr::hspool: torfast hspool client hsdir extend timeout availability cap_enabled=false cap_configured=true cap_startup_only=true configured_cap_ms=3000",
+                "2026-06-09T05:35:41Z DEBUG tor_circmgr::hspool: torfast hspool client hsdir extend timeout decision estimated_timeout_ms=5000 timeout_cap_ms=3000 cap_applied=true",
+                "2026-06-09T05:35:41Z  INFO tor_circmgr::hspool: torfast hspool client hsdir extend timeout cap enabled after bootstrap",
+                "2026-06-09T05:35:42Z  INFO tor_circmgr::hspool: torfast hspool client hsdir extend timeout cap disabled after bootstrap enabled_client_hsdir_requests=0",
             ]
         )
 
@@ -13863,6 +16191,10 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
                 "specific_circuit_ready",
                 "specific_circuit_failed",
                 "client_rend_circuit_ready",
+                "client_hsdir_extend_timeout_availability",
+                "client_hsdir_extend_timeout_decision",
+                "client_hsdir_extend_timeout_enabled_after_bootstrap",
+                "client_hsdir_extend_timeout_disabled_after_bootstrap",
             ],
         )
         self.assertEqual(timings[1]["launch_ms"], 783)
@@ -13870,6 +16202,110 @@ fn default_preemptive_min_exit_circs_for_port() -> usize {
         self.assertEqual(timings[4]["source"], "pool")
         self.assertEqual(timings[7]["extend_ms"], 44)
         self.assertEqual(timings[9]["elapsed_ms"], 22)
+        self.assertFalse(timings[10]["cap_enabled"])
+        self.assertEqual(timings[10]["configured_cap_ms"], 3000)
+        self.assertTrue(timings[11]["cap_applied"])
+        self.assertEqual(timings[11]["timeout_cap_ms"], 3000)
+        self.assertIsNotNone(timings[12]["timestamp_ms"])
+        self.assertIsNotNone(timings[13]["timestamp_ms"])
+        self.assertEqual(timings[13]["enabled_client_hsdir_requests"], 0)
+
+    def test_hspool_client_hsdir_timeout_cap_rows_show_cap_state_after_boot(
+        self,
+    ) -> None:
+        ready_epoch_ms = parse_log_timestamp_ms(
+            "2026-06-09T05:35:40Z  INFO arti::subcommands::proxy: Sufficiently bootstrapped; proxy now functional."
+        )
+        payload = {
+            "profiles": {
+                "arti_release_browser_hsdirextendcap3000ms_startuponly": {
+                    "arti_hspool_client_hsdir_extend_timeout_cap_ms": 3000,
+                    "arti_hspool_client_hsdir_extend_timeout_cap_startup_only": True,
+                    "boot": {
+                        "ok": True,
+                        "seconds": 12.0,
+                        "ready_epoch_ms": ready_epoch_ms,
+                        "signal_lines": [
+                            "2026-06-09T05:35:40Z  INFO arti::subcommands::proxy: Sufficiently bootstrapped; proxy now functional.",
+                            "2026-06-09T05:35:41Z  INFO tor_circmgr::hspool: torfast hspool client hsdir extend timeout cap disabled after bootstrap enabled_client_hsdir_requests=0",
+                        ],
+                    },
+                    "proxy_signal_lines": [
+                        "2026-06-09T05:35:42Z  INFO tor_circmgr::hspool: kind=ClientHsDir stem_kind=GUARDED source=pool elapsed_ms=0 torfast hspool timing stem ready",
+                        "2026-06-09T05:35:42Z  INFO tor_circmgr::hspool: torfast hspool client hsdir extend timeout availability cap_enabled=false cap_configured=true cap_startup_only=true configured_cap_ms=3000",
+                    ],
+                },
+                "arti_release_browser_hsdescshare": {
+                    "arti_hspool_client_hsdir_extend_timeout_cap_startup_only": False,
+                    "boot": {
+                        "ok": True,
+                        "seconds": 10.0,
+                        "ready_epoch_ms": ready_epoch_ms,
+                        "signal_lines": [
+                            "2026-06-09T05:35:40Z  INFO arti::subcommands::proxy: Sufficiently bootstrapped; proxy now functional.",
+                        ],
+                    },
+                    "proxy_signal_lines": [
+                        "2026-06-09T05:35:43Z  INFO tor_circmgr::hspool: torfast hspool client hsdir extend timeout availability cap_enabled=true cap_configured=false cap_startup_only=false configured_cap_ms=0",
+                    ],
+                },
+                "arti_release_browser_hsdescshare_hsdirextendcap3000ms_postbootonly": {
+                    "arti_hspool_client_hsdir_extend_timeout_cap_ms": 3000,
+                    "arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only": True,
+                    "boot": {
+                        "ok": True,
+                        "seconds": 11.0,
+                        "ready_epoch_ms": ready_epoch_ms,
+                        "signal_lines": [
+                            "2026-06-09T05:35:40Z  INFO arti::subcommands::proxy: Sufficiently bootstrapped; proxy now functional.",
+                            "2026-06-09T05:35:41Z  INFO tor_circmgr::hspool: torfast hspool client hsdir extend timeout cap enabled after bootstrap",
+                        ],
+                    },
+                    "proxy_signal_lines": [
+                        "2026-06-09T05:35:42Z  INFO tor_circmgr::hspool: kind=ClientHsDir stem_kind=GUARDED source=pool elapsed_ms=0 torfast hspool timing stem ready",
+                        "2026-06-09T05:35:42Z  INFO tor_circmgr::hspool: torfast hspool client hsdir extend timeout availability cap_enabled=true cap_configured=true cap_startup_only=false cap_post_boot_only=true configured_cap_ms=3000",
+                        "2026-06-09T05:35:42Z  INFO tor_circmgr::hspool: torfast hspool client hsdir extend timeout decision estimated_timeout_ms=5000 timeout_cap_ms=3000 cap_applied=true",
+                    ],
+                },
+            }
+        }
+
+        rows = hspool_client_hsdir_timeout_cap_rows(payload)
+
+        self.assertEqual(len(rows), 3)
+        startup_only_row = next(
+            row for row in rows if row["profile"].endswith("startuponly")
+        )
+        baseline_row = next(row for row in rows if row["profile"].endswith("hsdescshare"))
+        post_boot_only_row = next(
+            row for row in rows if row["profile"].endswith("postbootonly")
+        )
+
+        self.assertTrue(startup_only_row["startup_only"])
+        self.assertEqual(startup_only_row["configured_cap_ms"], 3000)
+        self.assertEqual(startup_only_row["first_client_hsdir_after_boot_s"], 2.0)
+        self.assertEqual(startup_only_row["first_availability_after_boot_s"], 2.0)
+        self.assertFalse(startup_only_row["first_availability_cap_enabled"])
+        self.assertTrue(startup_only_row["first_availability_cap_configured"])
+        self.assertEqual(startup_only_row["first_disable_after_boot_s"], 1.0)
+        self.assertEqual(
+            startup_only_row["enabled_client_hsdir_requests_before_disable"], 0
+        )
+        self.assertIn("turned off before any enabled ClientHsDir request", startup_only_row["summary"])
+
+        self.assertFalse(baseline_row["startup_only"])
+        self.assertTrue(baseline_row["first_availability_cap_enabled"])
+        self.assertEqual(baseline_row["decision_rows"], 0)
+
+        self.assertTrue(post_boot_only_row["post_boot_only"])
+        self.assertEqual(post_boot_only_row["configured_cap_ms"], 3000)
+        self.assertEqual(post_boot_only_row["first_enable_after_boot_s"], 1.0)
+        self.assertEqual(post_boot_only_row["first_client_hsdir_after_boot_s"], 2.0)
+        self.assertEqual(post_boot_only_row["first_availability_after_boot_s"], 2.0)
+        self.assertTrue(post_boot_only_row["first_availability_cap_enabled"])
+        self.assertEqual(post_boot_only_row["decision_rows"], 1)
+        self.assertEqual(post_boot_only_row["cap_applied_rows"], 1)
+        self.assertIn("turned on after bootstrap", post_boot_only_row["summary"])
 
     def test_parses_torfast_hs_timings(self) -> None:
         timings = parse_torfast_hs_timings(

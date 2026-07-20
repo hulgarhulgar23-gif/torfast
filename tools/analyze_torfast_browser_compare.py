@@ -117,6 +117,20 @@ def main(argv: list[str] | None = None) -> int:
         ),
         limit=max(1, args.top),
     )
+    startup_schedule_rows = limit_startup_family_schedule_rows(
+        startup_family_schedule_rows(
+            payload,
+            target_filter=target_filter,
+        ),
+        limit=max(1, args.top),
+    )
+    startup_schedule_delta = startup_family_schedule_delta_rows(
+        payload,
+        target_filter=target_filter,
+        baseline_profile=args.baseline_profile,
+        compare_profile=args.compare_profile,
+        limit=max(1, args.top),
+    )
     blocker_cache_rows = limit_blocker_cache_signal_rows(
         same_origin_blocker_cache_signal_rows(
             payload,
@@ -484,6 +498,74 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     stylesheet_end=fmt(row.get("median_stylesheet_response_end_ms")),
                     selectors=row.get("top_css_selectors", ""),
+                )
+            )
+
+    if startup_schedule_rows:
+        print("\n## Startup Family Schedule\n")
+        print(
+            "| profile | target | family | runs | median first request start ms | median first request order | median first fetch->request ms | median first active at request | median first max active in queue | median resources per run | top first resources |"
+        )
+        print(
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|"
+        )
+        for row in startup_schedule_rows:
+            print(
+                "| {profile} | {target} | {family} | {runs} | {request_start} | {request_order} | {queue} | {active_request} | {active_queue} | {resources_per_run} | {top_resources} |".format(
+                    profile=row["profile"],
+                    target=row["target"],
+                    family=row["family"],
+                    runs=fmt(row.get("runs")),
+                    request_start=fmt(row.get("median_first_request_start_ms")),
+                    request_order=fmt(row.get("median_first_request_order")),
+                    queue=fmt(row.get("median_first_fetch_to_request_ms")),
+                    active_request=fmt(
+                        row.get("median_first_active_same_origin_at_request")
+                    ),
+                    active_queue=fmt(
+                        row.get("median_first_max_same_origin_active_in_queue")
+                    ),
+                    resources_per_run=fmt(row.get("median_resources_per_run")),
+                    top_resources=row.get("top_first_resources", ""),
+                )
+            )
+
+    if startup_schedule_delta:
+        compare_profile = str(startup_schedule_delta[0]["compare_profile"])
+        baseline_profile = str(startup_schedule_delta[0]["baseline_profile"])
+        print(
+            f"\n## Startup Family Delta `{compare_profile}` vs `{baseline_profile}`\n"
+        )
+        print(
+            "| target | family | phase hint | compare first request start ms | baseline first request start ms | delta first request start ms | compare first request order | baseline first request order | delta first request order | delta first fetch->request ms | delta first max active in queue |"
+        )
+        print(
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|"
+        )
+        for row in startup_schedule_delta:
+            print(
+                "| {target} | {family} | {phase_hint} | {compare_request_start} | {baseline_request_start} | {delta_request_start} | {compare_request_order} | {baseline_request_order} | {delta_request_order} | {delta_queue} | {delta_active_queue} |".format(
+                    target=row["target"],
+                    family=row["family"],
+                    phase_hint=row.get("phase_hint", ""),
+                    compare_request_start=fmt(
+                        row.get("compare_first_request_start_ms")
+                    ),
+                    baseline_request_start=fmt(
+                        row.get("baseline_first_request_start_ms")
+                    ),
+                    delta_request_start=fmt(row.get("delta_first_request_start_ms")),
+                    compare_request_order=fmt(
+                        row.get("compare_first_request_order")
+                    ),
+                    baseline_request_order=fmt(
+                        row.get("baseline_first_request_order")
+                    ),
+                    delta_request_order=fmt(row.get("delta_first_request_order")),
+                    delta_queue=fmt(row.get("delta_first_fetch_to_request_ms")),
+                    delta_active_queue=fmt(
+                        row.get("delta_first_max_same_origin_active_in_queue")
+                    ),
                 )
             )
 
@@ -2605,6 +2687,283 @@ def limit_resource_family_summary_rows(
     return output
 
 
+def startup_family_schedule_rows(
+    payload: dict[str, object],
+    *,
+    target_filter: set[str] | None = None,
+) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, str, str], list[dict[str, object]]] = defaultdict(list)
+    for profile_name, target, _run_index, _profile_run, browser_run in iter_browser_runs(
+        payload, target_filter=target_filter
+    ):
+        nav = browser_nav(browser_run)
+        resources = browser_resources(browser_run)
+        metrics = []
+        for resource in resources:
+            row = resource_metric_row(resource, nav, resources)
+            if row is not None:
+                metrics.append(row)
+        ordered = sorted(
+            metrics,
+            key=lambda row: (
+                numeric(row.get("request_start_ms"))
+                if numeric(row.get("request_start_ms")) is not None
+                else float("inf"),
+                str(row.get("resource", "")),
+            ),
+        )
+        request_order = 0
+        for row in ordered:
+            if numeric(row.get("request_start_ms")) is None:
+                continue
+            request_order += 1
+            row["request_order"] = request_order
+        family_groups: dict[str, list[dict[str, object]]] = defaultdict(list)
+        for row in metrics:
+            family = str(row.get("family") or "")
+            if family:
+                family_groups[family].append(row)
+        for family, family_metrics in family_groups.items():
+            first_metric = next(
+                (
+                    row
+                    for row in sorted(
+                        family_metrics,
+                        key=lambda current: (
+                            numeric(current.get("request_start_ms"))
+                            if numeric(current.get("request_start_ms")) is not None
+                            else float("inf"),
+                            str(current.get("resource", "")),
+                        ),
+                    )
+                    if numeric(row.get("request_start_ms")) is not None
+                ),
+                None,
+            )
+            if first_metric is None:
+                continue
+            unique_resources = {
+                str(row.get("resource", ""))
+                for row in family_metrics
+                if str(row.get("resource", ""))
+            }
+            grouped[(profile_name, target, family)].append(
+                {
+                    "first_request_start_ms": first_metric.get("request_start_ms"),
+                    "first_request_order": first_metric.get("request_order"),
+                    "first_fetch_to_request_ms": first_metric.get(
+                        "fetch_to_request_ms"
+                    ),
+                    "first_active_same_origin_at_request": first_metric.get(
+                        "active_same_origin_at_request"
+                    ),
+                    "first_max_same_origin_active_in_queue": first_metric.get(
+                        "max_same_origin_active_in_queue"
+                    ),
+                    "resources_per_run": len(family_metrics),
+                    "unique_resources_per_run": len(unique_resources),
+                    "first_resource": str(first_metric.get("resource", "")),
+                }
+            )
+
+    rows = []
+    for (profile_name, target, family), schedule_rows in sorted(grouped.items()):
+        rows.append(
+            summarize_startup_family_schedule_group(
+                profile_name=profile_name,
+                target=target,
+                family=family,
+                rows=schedule_rows,
+            )
+        )
+    return rows
+
+
+def summarize_startup_family_schedule_group(
+    *,
+    profile_name: str,
+    target: str,
+    family: str,
+    rows: list[dict[str, object]],
+) -> dict[str, object]:
+    first_request_starts = [
+        value
+        for row in rows
+        if (value := numeric(row.get("first_request_start_ms"))) is not None
+    ]
+    first_request_orders = [
+        value
+        for row in rows
+        if (value := numeric(row.get("first_request_order"))) is not None
+    ]
+    first_fetch_to_request = [
+        value
+        for row in rows
+        if (value := numeric(row.get("first_fetch_to_request_ms"))) is not None
+    ]
+    first_active_at_request = [
+        value
+        for row in rows
+        if (value := numeric(row.get("first_active_same_origin_at_request"))) is not None
+    ]
+    first_active_in_queue = [
+        value
+        for row in rows
+        if (value := numeric(row.get("first_max_same_origin_active_in_queue"))) is not None
+    ]
+    resources_per_run = [
+        value
+        for row in rows
+        if (value := numeric(row.get("resources_per_run"))) is not None
+    ]
+    unique_resources_per_run = [
+        value
+        for row in rows
+        if (value := numeric(row.get("unique_resources_per_run"))) is not None
+    ]
+    first_resource_freq: dict[str, int] = defaultdict(int)
+    for row in rows:
+        first_resource = str(row.get("first_resource", ""))
+        if first_resource:
+            first_resource_freq[first_resource] += 1
+    top_first_resources = sorted(
+        first_resource_freq.items(),
+        key=lambda item: (item[1], item[0]),
+        reverse=True,
+    )
+    return {
+        "profile": profile_name,
+        "target": target,
+        "family": family,
+        "runs": len(rows),
+        "median_first_request_start_ms": median(first_request_starts),
+        "median_first_request_order": median(first_request_orders),
+        "median_first_fetch_to_request_ms": median(first_fetch_to_request),
+        "median_first_active_same_origin_at_request": median(
+            first_active_at_request
+        ),
+        "median_first_max_same_origin_active_in_queue": median(
+            first_active_in_queue
+        ),
+        "median_resources_per_run": median(resources_per_run),
+        "median_unique_resources_per_run": median(unique_resources_per_run),
+        "top_first_resources": ", ".join(
+            compact_resource(resource, 36)
+            for resource, _count in top_first_resources[:3]
+        ),
+    }
+
+
+def limit_startup_family_schedule_rows(
+    rows: list[dict[str, object]], *, limit: int
+) -> list[dict[str, object]]:
+    grouped: dict[tuple[str, str], list[dict[str, object]]] = defaultdict(list)
+    for row in rows:
+        grouped[(str(row.get("profile", "")), str(row.get("target", "")))].append(row)
+
+    output = []
+    for key in sorted(grouped):
+        rows_for_key = sorted(
+            grouped[key],
+            key=lambda row: (
+                numeric(row.get("median_first_request_start_ms"))
+                if numeric(row.get("median_first_request_start_ms")) is not None
+                else float("inf"),
+                numeric(row.get("median_first_request_order"))
+                if numeric(row.get("median_first_request_order")) is not None
+                else float("inf"),
+                str(row.get("family", "")),
+            ),
+        )
+        output.extend(rows_for_key[:limit])
+    return output
+
+
+def startup_family_schedule_delta_rows(
+    payload: dict[str, object],
+    *,
+    target_filter: set[str] | None = None,
+    baseline_profile: str | None = None,
+    compare_profile: str | None = None,
+    limit: int = 8,
+) -> list[dict[str, object]]:
+    grouped = startup_family_schedule_rows(payload, target_filter=target_filter)
+    if not grouped:
+        return []
+    available_profiles = sorted({str(row["profile"]) for row in grouped})
+    if baseline_profile is None:
+        baseline_profile = default_baseline_profile(available_profiles)
+    if compare_profile is None:
+        compare_profile = default_compare_profile(available_profiles, baseline_profile)
+    if not baseline_profile or not compare_profile:
+        return []
+
+    baseline_map = {
+        (str(row["target"]), str(row["family"])): row
+        for row in grouped
+        if row["profile"] == baseline_profile
+    }
+    compare_rows = [row for row in grouped if row["profile"] == compare_profile]
+    joined = []
+    for row in compare_rows:
+        key = (str(row["target"]), str(row["family"]))
+        baseline = baseline_map.get(key)
+        if baseline is None:
+            continue
+        joined.append(
+            {
+                "target": key[0],
+                "family": key[1],
+                "compare_profile": compare_profile,
+                "baseline_profile": baseline_profile,
+                "compare_first_request_start_ms": row.get(
+                    "median_first_request_start_ms"
+                ),
+                "baseline_first_request_start_ms": baseline.get(
+                    "median_first_request_start_ms"
+                ),
+                "delta_first_request_start_ms": subtract(
+                    row.get("median_first_request_start_ms"),
+                    baseline.get("median_first_request_start_ms"),
+                ),
+                "compare_first_request_order": row.get("median_first_request_order"),
+                "baseline_first_request_order": baseline.get(
+                    "median_first_request_order"
+                ),
+                "delta_first_request_order": subtract(
+                    row.get("median_first_request_order"),
+                    baseline.get("median_first_request_order"),
+                ),
+                "delta_first_fetch_to_request_ms": subtract(
+                    row.get("median_first_fetch_to_request_ms"),
+                    baseline.get("median_first_fetch_to_request_ms"),
+                ),
+                "delta_first_max_same_origin_active_in_queue": subtract(
+                    row.get("median_first_max_same_origin_active_in_queue"),
+                    baseline.get("median_first_max_same_origin_active_in_queue"),
+                ),
+                "delta_resources_per_run": subtract(
+                    row.get("median_resources_per_run"),
+                    baseline.get("median_resources_per_run"),
+                ),
+            }
+        )
+        joined[-1]["phase_hint"] = startup_family_delta_phase_hint(joined[-1])
+    joined.sort(
+        key=lambda row: (
+            abs(numeric(row.get("delta_first_request_start_ms")) or 0.0),
+            abs(numeric(row.get("delta_first_request_order")) or 0.0),
+            abs(numeric(row.get("delta_first_fetch_to_request_ms")) or 0.0),
+            abs(
+                numeric(row.get("delta_first_max_same_origin_active_in_queue"))
+                or 0.0
+            ),
+        ),
+        reverse=True,
+    )
+    return joined[:limit]
+
+
 def resource_family_delta_rows(
     payload: dict[str, object],
     *,
@@ -3293,6 +3652,34 @@ def resource_family_delta_phase_hint(row: dict[str, object]) -> str:
     if second_value >= max(100.0, top_value * 0.75):
         return "mixed"
     return top_name
+
+
+def startup_family_delta_phase_hint(row: dict[str, object]) -> str:
+    delta_request_start = numeric(row.get("delta_first_request_start_ms")) or 0.0
+    delta_request_order = numeric(row.get("delta_first_request_order")) or 0.0
+    delta_queue = numeric(row.get("delta_first_fetch_to_request_ms")) or 0.0
+    delta_active_queue = (
+        numeric(row.get("delta_first_max_same_origin_active_in_queue")) or 0.0
+    )
+    if delta_request_start <= -100.0 and delta_queue <= -100.0:
+        return "earlier"
+    if delta_request_start >= 100.0 and delta_queue >= max(
+        100.0, delta_request_start * 0.75
+    ):
+        return "mixed"
+    if delta_request_start >= 100.0:
+        return "request discovery"
+    if delta_queue >= 100.0 or delta_active_queue >= 1.0:
+        return "start/queue"
+    if delta_request_order >= 1.0:
+        return "startup order"
+    if (
+        delta_request_start <= -100.0
+        or delta_queue <= -100.0
+        or delta_request_order <= -1.0
+    ):
+        return "earlier"
+    return "flat"
 
 
 def bytes_to_kib(value: float) -> float:

@@ -301,11 +301,16 @@ def rows_from_latest_arti_quality_config(results_dir: Path) -> list[dict[str, st
         return []
     payload = load_json(paths[-1])
     checks = payload.get("checks", [])
+    blocking_checks = payload.get("blocking_check_count")
+    advisory_checks = payload.get("advisory_check_count")
+    summary = f"{len(checks)} static checks"
+    if isinstance(blocking_checks, int) and isinstance(advisory_checks, int):
+        summary = f"{blocking_checks} blocking + {advisory_checks} advisory static checks"
     return [
         quality_row(
             paths[-1],
             "arti_source_config",
-            f"{len(checks)} static checks",
+            summary,
             bool(payload.get("runtime_circuit_path_proof")),
             False,
             bool(payload.get("ok")),

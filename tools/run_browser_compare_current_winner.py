@@ -35,11 +35,6 @@ def main() -> int:
         str(args.runs),
         "--window-size",
         args.window_size,
-        "--arti-exit-same-isolation-target",
-        "2",
-        "--arti-exit-same-isolation-prewarm-first-stream",
-        "--arti-exit-select-health-aware",
-        "--arti-exit-select-prefer-cold-same-isolation",
     ]
     return subprocess.run(cmd, check=False).returncode
 

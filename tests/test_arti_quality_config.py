@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from check_arti_quality_config import evaluate_sources
+from check_arti_quality_config import blocking_failures, evaluate_sources
 
 
 GOOD_SOURCES = {
@@ -95,6 +95,7 @@ const TORFAST_PREEMPTIVE_443_BURST_MIN_REQUESTS_ENV: &str =
     "TORFAST_PREEMPTIVE_443_BURST_MIN_REQUESTS";
 const TORFAST_PREEMPTIVE_443_BURST_MIN_REQUESTS_MIN: usize = 2;
 const TORFAST_PREEMPTIVE_443_BURST_MIN_REQUESTS_MAX: usize = 32;
+const TORFAST_PREEMPTIVE_443_BURST_MIN_REQUESTS_DEFAULT: usize = 2;
 const TORFAST_PREEMPTIVE_443_BURST_WINDOW_MS: u64 = 2_000;
 fn parse_torfast_preemptive_443_circs() {}
 fn torfast_preemptive_443_circs_from_env_value() {
@@ -106,6 +107,7 @@ fn torfast_preemptive_443_circs_from_env_value() {
 }
 fn parse_torfast_preemptive_443_burst_min_requests() {
     std::env::var(TORFAST_PREEMPTIVE_443_BURST_MIN_REQUESTS_ENV);
+    torfast_preemptive_443_burst_min_requests_from_env_value
     "0" | "false" | "no" | "off";
     recent_443_usages: VecDeque<Instant>;
     recent_443_usage_count;
@@ -119,6 +121,11 @@ const TORFAST_HSPOOL_BACKGROUND_START_DELAY_MS_ENV: &str =
     "TORFAST_HSPOOL_BACKGROUND_START_DELAY_MS";
 const TORFAST_HSPOOL_BACKGROUND_START_DELAY_DEFAULT_MS: u64 = 1_000;
 const TORFAST_HSPOOL_BACKGROUND_START_DELAY_MAX_MS: u64 = 60_000;
+const TORFAST_HSPOOL_BACKGROUND_START_ON_DEMAND_ENV: &str =
+    "TORFAST_HSPOOL_BACKGROUND_START_ON_DEMAND";
+fn torfast_hspool_background_start_on_demand_from_env_value() {}
+fn torfast_hspool_background_start_on_demand() {}
+"torfast hspool background start waiting for on-demand fire"
 fn torfast_hspool_background_start_delay() {}
 schedule.fire_in(torfast_hspool_background_start_delay());
 const TORFAST_HSPOOL_LAUNCH_PARALLELISM_ENV: &str = "TORFAST_HSPOOL_LAUNCH_PARALLELISM";
@@ -137,6 +144,22 @@ const TORFAST_HSPOOL_ON_DEMAND_POOL_RACE_MS_ENV: &str =
     "TORFAST_HSPOOL_ON_DEMAND_POOL_RACE_MS";
 const TORFAST_HSPOOL_ON_DEMAND_POOL_RACE_DEFAULT_MS: u64 = 0;
 const TORFAST_HSPOOL_ON_DEMAND_POOL_RACE_MAX_MS: u64 = 1_000;
+const TORFAST_HSPOOL_BACKGROUND_BUILD_TIMEOUT_CAP_MS_ENV: &str =
+    "TORFAST_HSPOOL_BACKGROUND_BUILD_TIMEOUT_CAP_MS";
+const TORFAST_HSPOOL_BACKGROUND_BUILD_TIMEOUT_CAP_MIN_MS: u64 = 500;
+const TORFAST_HSPOOL_BACKGROUND_BUILD_TIMEOUT_CAP_MAX_MS: u64 = 10_000;
+fn torfast_hspool_background_build_timeout_cap_from_env_value() {}
+fn torfast_hspool_background_build_timeout_cap() {}
+launch_hs_unmanaged_with_timeout_cap
+const TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_MS_ENV: &str =
+    "TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_MS";
+const TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_MIN_MS: u64 = 500;
+const TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_MAX_MS: u64 = 10_000;
+fn torfast_hspool_client_hsdir_extend_timeout_cap_from_env_value() {}
+fn torfast_hspool_client_hsdir_extend_timeout_cap() {}
+if kind == HsCircKind::ClientHsDir
+extend_timeout_cap
+torfast hspool client hsdir extend timeout capped
 fn torfast_hspool_on_demand_pool_race_from_env_value() {}
 fn torfast_hspool_on_demand_pool_race() {}
 race_on_demand_with_ready_stem_circuit
@@ -157,9 +180,12 @@ source = "on_demand"
 extend_ms = extend_started.elapsed().as_millis()
 let mut waiting_for_netdir = false;
 waiting_for_netdir = true;
+if !netdir.have_enough_paths()
+torfast hspool waiting for path-sufficient netdir
 if launch_parallelism == 1 {}
 FuturesUnordered;
 launch_hs_unmanaged::<OwnedChanTarget>;
+launch_hs_unmanaged_with_timeout_cap::<OwnedChanTarget>
 circs_to_launch.note_circ_launch_failed(kind);
 if waiting_for_netdir && circs_to_launch.n_to_launch() > 0 {
     schedule.fire_in(NETDIR_RETRY_DELAY);
@@ -168,9 +194,26 @@ if waiting_for_netdir && circs_to_launch.n_to_launch() > 0 {
     "circmgr_hspool_pool": """
 const DEFAULT_GUARDED_STEM_TARGET: usize = 2;
 const TORFAST_HSPOOL_GUARDED_STEM_TARGET_ENV: &str = "TORFAST_HSPOOL_GUARDED_STEM_TARGET";
+const TORFAST_HSPOOL_GUARDED_STEM_TARGET_DEFER_POST_BOOT_ENV: &str =
+    "TORFAST_HSPOOL_GUARDED_STEM_TARGET_DEFER_POST_BOOT";
+const TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_STARTUP_ONLY_ENV: &str =
+    "TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_STARTUP_ONLY";
+const TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_POST_BOOT_ONLY_ENV: &str =
+    "TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_POST_BOOT_ONLY";
 const TORFAST_HSPOOL_GUARDED_STEM_TARGET_MAX: usize = 16;
 fn torfast_hspool_guarded_stem_target_from_env_value() {}
 fn torfast_hspool_guarded_stem_target() {}
+fn torfast_hspool_guarded_stem_target_defer_post_boot_from_env_value() {}
+fn torfast_hspool_guarded_stem_target_defer_post_boot() {}
+fn torfast_hspool_client_hsdir_extend_timeout_cap_startup_only_from_env_value() {}
+fn torfast_hspool_client_hsdir_extend_timeout_cap_startup_only() {}
+fn torfast_hspool_client_hsdir_extend_timeout_cap_post_boot_only_from_env_value() {}
+fn torfast_hspool_client_hsdir_extend_timeout_cap_post_boot_only() {}
+deferred_guarded_stem_target
+enable_guarded_stem_target_after_post_boot
+client_hsdir_extend_timeout_cap_enabled
+disable_client_hsdir_extend_timeout_cap_after_bootstrap
+enable_client_hsdir_extend_timeout_cap_after_bootstrap
 guarded_stem_target: torfast_hspool_guarded_stem_target()
 .clamp(
 torfast_hspool_guarded_stem_target(),
@@ -650,6 +693,53 @@ pending_age_ms >= TORFAST_SLOW_TUNNEL_BUILD_LOG_MS
 usage_kind
 info!(
 tunnel_unique_id = %tunnel_unique_id
+const TORFAST_EXIT_BAD_HEALTH_REPLACEMENT_ENV: &str =
+    "TORFAST_EXIT_BAD_HEALTH_REPLACEMENT";
+const TORFAST_EXIT_BAD_HEALTH_REPLACEMENT_MIN_ACTIVE_STREAMS: u64 = 2;
+fn torfast_exit_bad_health_replacement_from_env_value(value: Option<&str>) -> bool {}
+fn torfast_exit_bad_health_replacement_enabled() -> bool {}
+std::env::var(TORFAST_EXIT_BAD_HEALTH_REPLACEMENT_ENV)
+torfast_env_flag(value.map(str::to_owned), true)
+fn torfast_bad_health_replacement_is_enabled_with_exit_flag(
+TargetTunnelUsage::Exit { .. } => {
+selected_active_streams >= TORFAST_EXIT_BAD_HEALTH_REPLACEMENT_MIN_ACTIVE_STREAMS
+bad_health_replacement_is_dir_microdesc_safe_and_exit_needs_live_pressure
+const TORFAST_DIR_MICRODESC_BAD_HEALTH_REPLACEMENT_IGNORE_SCORE_ONLY_ENV: &str =
+    "TORFAST_DIR_MICRODESC_BAD_HEALTH_REPLACEMENT_IGNORE_SCORE_ONLY";
+fn torfast_dir_microdesc_bad_health_replacement_ignore_score_only_from_env_value() {}
+fn torfast_dir_microdesc_bad_health_replacement_ignore_score_only() {}
+torfast_health_is_bad_score_only
+score_only_dir_microdesc
+const TORFAST_DIR_MICRODESC_SPARE_TARGET: usize = 3;
+fn torfast_should_top_up_dir_microdesc_spare(
+pending_supported_count == 0
+!has_unassigned_open_alternate
+open_candidates < TORFAST_DIR_MICRODESC_SPARE_TARGET
+torfast_has_unassigned_open_alternate(usage, &selected_tunnel_id)
+torfast dir microdesc spare topup
+dir_microdesc_spare_topup_is_microdesc_only_and_bounded
+const TORFAST_EXIT_SELECT_SAME_ISOLATION_MAX_ASSIGNED_STREAMS_ENV: &str =
+    "TORFAST_EXIT_SELECT_SAME_ISOLATION_MAX_ASSIGNED_STREAMS";
+const TORFAST_EXIT_SELECT_SAME_ISOLATION_MAX_ASSIGNED_STREAMS_MIN: u64 = 1;
+const TORFAST_EXIT_SELECT_SAME_ISOLATION_MAX_ASSIGNED_STREAMS_MAX: u64 = 32;
+fn torfast_exit_select_same_isolation_max_assigned_streams() -> Option<u64> {}
+std::env::var(TORFAST_EXIT_SELECT_SAME_ISOLATION_MAX_ASSIGNED_STREAMS_ENV)
+const TORFAST_EXIT_SELECT_SAME_ISOLATION_MAX_ASSIGNED_STREAMS_TOPUP_ENV: &str =
+    "TORFAST_EXIT_SELECT_SAME_ISOLATION_MAX_ASSIGNED_STREAMS_TOPUP";
+fn torfast_exit_select_same_isolation_max_assigned_streams_topup_is_enabled() -> bool {}
+const TORFAST_EXIT_SELECT_SAME_ISOLATION_MAX_ASSIGNED_STREAMS_PENDING_WAIT_ENV: &str =
+    "TORFAST_EXIT_SELECT_SAME_ISOLATION_MAX_ASSIGNED_STREAMS_PENDING_WAIT_MS";
+const TORFAST_EXIT_SELECT_SAME_ISOLATION_MAX_ASSIGNED_STREAMS_PENDING_WAIT_MIN_MS: u64 = 50;
+const TORFAST_EXIT_SELECT_SAME_ISOLATION_MAX_ASSIGNED_STREAMS_PENDING_WAIT_MAX_MS: u64 = 2_000;
+fn torfast_exit_select_same_isolation_max_assigned_streams_pending_wait() -> Option<Duration> {}
+torfast_should_top_up_same_isolation_assigned_cap
+torfast_should_wait_for_same_isolation_assigned_cap_pending
+same_isolation_assigned_stream_capped_selected_index
+selected_candidate_index_after_same_isolation_assigned_cap
+same_isolation_assigned_stream_cap_moved
+same_isolation_assigned_stream_cap_saturated
+torfast_exit_isolation_bucket(usage)
+"exit_compatible_isolated" | "exit_unisolated"
 """,
     "circmgr_usage": """
 enum TargetTunnelUsage {
@@ -673,21 +763,38 @@ supported.len() >= circs.saturating_add(extra_cap)
 const TORFAST_HS_INTRO_REND_OVERLAP_ENV: &str = "TORFAST_HS_INTRO_REND_OVERLAP";
 const TORFAST_HS_REND_PREBUILD_BEFORE_DESC_ENV: &str =
     "TORFAST_HS_REND_PREBUILD_BEFORE_DESC";
+const TORFAST_HS_REND_PREBUILD_BEFORE_DESC_SHARED_HIT_ONLY_ENV: &str =
+    "TORFAST_HS_REND_PREBUILD_BEFORE_DESC_SHARED_HIT_ONLY";
+const TORFAST_HS_REND_PREBUILD_COLD_AFTER_DESC_STREAM_READY_MS_ENV: &str =
+    "TORFAST_HS_REND_PREBUILD_COLD_AFTER_DESC_STREAM_READY_MS";
 const TORFAST_HS_INTRO_CIRCUIT_HEDGE_MS_ENV: &str = "TORFAST_HS_INTRO_CIRCUIT_HEDGE_MS";
+const TORFAST_HS_RENDEZVOUS_ESTABLISH_TIMEOUT_FLOOR_MS_ENV: &str =
+    "TORFAST_HS_RENDEZVOUS_ESTABLISH_TIMEOUT_FLOOR_MS";
 const TORFAST_HS_DESC_SHARED_CACHE_ENV: &str = "TORFAST_HS_DESC_SHARED_CACHE";
 const TORFAST_HS_INTRO_CIRCUIT_HEDGE_MIN_MS: u64 = 500;
 const TORFAST_HS_INTRO_CIRCUIT_HEDGE_MAX_MS: u64 = 60_000;
+const TORFAST_HS_RENDEZVOUS_ESTABLISH_TIMEOUT_FLOOR_MIN_MS: u64 = 500;
+const TORFAST_HS_RENDEZVOUS_ESTABLISH_TIMEOUT_FLOOR_MAX_MS: u64 = 60_000;
 struct TorfastHsDescSharedCacheKey { hs_blind_id: HsBlindId }
 fn torfast_hs_intro_rend_overlap_from_env_value() {}
 fn torfast_hs_intro_rend_overlap() {}
 fn torfast_hs_rend_prebuild_before_desc_from_env_value() {}
 fn torfast_hs_rend_prebuild_before_desc() {}
+fn torfast_hs_rend_prebuild_before_desc_shared_hit_only_from_env_value() {}
+fn torfast_hs_rend_prebuild_before_desc_shared_hit_only() {}
+fn torfast_hs_rend_prebuild_cold_after_desc_stream_ready_ms_from_env_value() {}
+fn torfast_hs_rend_prebuild_cold_after_desc_stream_ready_timeout() {}
 fn torfast_hs_desc_shared_cache_from_env_value() {}
 fn torfast_hs_desc_shared_cache_enabled() {}
 fn torfast_hs_intro_circuit_hedge_ms_from_env_value() {}
 fn torfast_hs_intro_circuit_hedge_delay() {}
+fn torfast_hs_rendezvous_establish_timeout_floor_ms_from_env_value() {}
+fn torfast_hs_rendezvous_establish_timeout_floor() {}
+fn torfast_hs_rendezvous_establish_timeout_with_floor() {}
+fn torfast_hs_rendezvous_establish_timeout() {}
 fn torfast_hs_desc_shared_cache_get() {}
 fn torfast_hs_desc_shared_cache_store() {}
+fn cold_descriptor_late_rend_prebuild() {}
 Arc::as_ptr(&self.secret_keys.keys);
 refetch.is_none();
 data.insert(shared_desc);
@@ -695,21 +802,38 @@ desc.clone();
 desc: DataHsDesc;
 ipts: DataIpts;
 hsdirs: DataHsDirs;
+shared_desc_ready = true;
+shared_hit_only = prebuild_before_desc_shared_hit_only;
+self.cold_descriptor_late_rend_prebuild(timeout);
+torfast hs timing cold descriptor late rend prebuild armed;
+torfast hs timing cold descriptor late rend prebuild timed out;
 saved_rendezvous.is_none();
 futures::join!(descriptor, rendezvous);
 futures::join!(establish_rendezvous, obtain_intro_circuit);
 self.establish_rendezvous();
-self.obtain_intro_circuit(ipt, hs_timing_started);
+self.obtain_intro_circuit(ipt);
 intro_rend_connect(desc, &mut data.ipts, prebuilt_rendezvous);
 intro_rend_connect(desc, &mut data.ipts, None);
 self.exchange_introduce_with_circ();
 fn obtain_intro_circuit_with_hedge() {}
 torfast hs timing intro circuit hedge launched
 torfast hs timing intro circuit hedge won
+torfast hs timing rendezvous establish timeout floor applied
 torfast hs timing descriptor shared cache hit
 torfast hs timing descriptor shared cache store
 self.obtain_intro_circuit_once();
 m_get_or_launch_intro();
+""",
+    "tor_hsclient_state": """
+const TORFAST_HS_STATE_REUSE_MAX_ACTIVE_STREAMS_ENV: &str =
+    "TORFAST_HS_STATE_REUSE_MAX_ACTIVE_STREAMS";
+const TORFAST_HS_STATE_REUSE_MAX_ACTIVE_STREAMS_MIN: u64 = 1;
+const TORFAST_HS_STATE_REUSE_MAX_ACTIVE_STREAMS_MAX: u64 = 8;
+fn torfast_hs_state_reuse_max_active_streams_from_env_value() {}
+fn torfast_hs_state_reuse_max_active_streams() {}
+D::tunnel_active_streams(tunnel);
+active_streams >= max_active_streams;
+torfast hs state timing cache hit blocked active streams
 """,
     "circmgr_build": """
 const TORFAST_SLOW_CHANNEL_OPEN_LOG_MS: u128 = 1_000;
@@ -874,6 +998,24 @@ fn torfast_microdesc_partial_retry_chunking_signal(missing: &[DocId]) -> bool {
         && response.error().is_some()
     info!("torfast microdescriptor partial retry chunking signal");
 }
+
+const TORFAST_DIR_MICRODESC_HEDGE_DEFAULT_MS: u64 = 2_000;
+const TORFAST_DIR_MICRODESC_RETRY_IDS_PER_REQUEST_DEFAULT: usize = 250;
+const TORFAST_DIR_MICRODESC_RETRY_DELAY_MAX_DEFAULT_MS: u64 = 500;
+fn torfast_microdesc_hedge_delay_from_env_value(value: Option<&str>) -> Option<Duration> {}
+fn parse_torfast_microdesc_retry_ids_per_request(value: Option<&str>) -> Option<usize> {}
+fn torfast_microdesc_retry_ids_per_request_from_env_value(value: Option<&str>) -> Option<usize> {}
+fn torfast_microdesc_retry_ids_per_request_from_env_value(
+    value: Option<&str>,
+) -> Option<usize> {}
+fn parse_torfast_microdesc_retry_delay_max_ms(value: Option<&str>) -> Option<Duration> {}
+fn torfast_microdesc_retry_delay_max_from_env_value(value: Option<&str>) -> Option<Duration> {}
+fn torfast_microdesc_retry_delay_max_from_env_value(
+    value: Option<&str>,
+) -> Option<Duration> {}
+fn torfast_microdesc_partial_retry_chunking_from_env_value(value: Option<&str>) -> bool {}
+Some(Duration::from_millis(TORFAST_DIR_MICRODESC_HEDGE_DEFAULT_MS))
+"0" | "off" | "false" | "no"
 
 fn fetch_single_maybe_hedged() {
     info!("torfast microdescriptor hedge started");
@@ -1083,6 +1225,7 @@ fn log_dirclient_timing() {
     }
     info!("torfast dirclient timing");
 }
+same path and eligibility rules as
 """,
     "tor_proto_client": """
 	pub fn circuit_health_snapshot(&self) -> Result<circuit::CircuitHealthSnapshot> {
@@ -1182,12 +1325,42 @@ if torfast_stream_lifecycle_log_enabled() {
     "tor_proto_data_stream": """
 TORFAST_STREAM_READY_DATA_COALESCE_BYTES
 fn torfast_stream_ready_data_coalesce_bytes() -> Option<usize> {}
+TORFAST_STREAM_READY_DATA_COALESCE_BYTES_DEFAULT: usize = 498
 TORFAST_STREAM_READY_DATA_COALESCE_BYTES_MIN: usize = 498
 TORFAST_STREAM_READY_DATA_COALESCE_BYTES_MAX: usize = 64 * 1024
 std::env::var(TORFAST_STREAM_READY_DATA_COALESCE_BYTES_ENV)
+TORFAST_STREAM_READY_DATA_COALESCE_START_BACKLOG_BYTES_ENV
+fn torfast_stream_ready_data_coalesce_start_backlog_bytes_from_env_value() -> usize {}
+TORFAST_STREAM_READY_DATA_COALESCE_START_BACKLOG_BYTES_DEFAULT: usize = 498
+TORFAST_STREAM_READY_DATA_COALESCE_START_BACKLOG_BYTES_MIN: usize = 498
+TORFAST_STREAM_READY_DATA_COALESCE_START_BACKLOG_BYTES_MAX: usize = 64 * 1024
+std::env::var(TORFAST_STREAM_READY_DATA_COALESCE_START_BACKLOG_BYTES_ENV)
+TORFAST_STREAM_READY_DATA_COALESCE_MIN_HOP
+fn torfast_stream_ready_data_coalesce_min_hop_from_env_value() -> Option<usize> {}
+TORFAST_STREAM_READY_DATA_COALESCE_MIN_HOP_MIN: usize = 1
+TORFAST_STREAM_READY_DATA_COALESCE_MIN_HOP_MAX: usize = 16
+std::env::var(TORFAST_STREAM_READY_DATA_COALESCE_MIN_HOP_ENV)
+"0" | "off" | "false" | "no"
+Some(TORFAST_STREAM_READY_DATA_COALESCE_BYTES_DEFAULT)
+TORFAST_STREAM_READY_DATA_COALESCE_BUSY_ACTIVE_STREAMS: u64 = 4
+TORFAST_STREAM_READY_DATA_COALESCE_BUSY_MAX_BYTES_ENV
+TORFAST_STREAM_READY_DATA_COALESCE_BUSY_MAX_BYTES_DEFAULT: usize =
+TORFAST_STREAM_READY_DATA_COALESCE_BUSY_MAX_BYTES_MIN: usize =
+TORFAST_STREAM_READY_DATA_COALESCE_BUSY_MAX_BYTES_MAX: usize =
+fn torfast_stream_ready_data_coalesce_busy_max_bytes_from_env_value() -> usize {}
+std::env::var(TORFAST_STREAM_READY_DATA_COALESCE_BUSY_MAX_BYTES_ENV)
+fn torfast_stream_ready_data_coalesce_effective_max_bytes() -> usize {}
+fn torfast_should_ready_coalesce_data(max_bytes: usize) -> bool {}
+fn torfast_stream_ready_data_coalesce_hop_allowed() {}
+self.s.target.hop
+usize::from(hop_num) + 1 >= min_hop
 if let Some(max_bytes) = torfast_stream_ready_data_coalesce_bytes() {}
-while imp.should_ready_coalesce_data(max_bytes) {}
-self.pending_bytes() < max_bytes && self.s.next_queued_msg_is_data()
+imp.torfast_ready_coalesce_effective_max_bytes(
+while imp.should_ready_coalesce_data(effective_max_bytes) {}
+self.torfast_user_read_bytes > 0
+self.s.receiver.approx_stream_bytes()
+self.s.next_queued_msg_is_data()
+approx_queued_bytes >= torfast_stream_ready_data_coalesce_start_backlog_bytes()
 TORFAST_STREAM_SLOW_TRANSFER_LOG_MS: u128 = 5_000
 transfer_ms >= TORFAST_STREAM_SLOW_TRANSFER_LOG_MS || !returned_eof
 torfast_user_read_bytes
@@ -1236,6 +1409,8 @@ const SOCKS_TOR_TO_CLIENT_COALESCE_BYTES_ENV: &str =
     "TORFAST_SOCKS_TOR_TO_CLIENT_COALESCE_BYTES";
 const SOCKS_PARTIAL_RELAY_IDLE_TIMEOUT_ENV: &str =
     "TORFAST_SOCKS_PARTIAL_RELAY_IDLE_TIMEOUT_MS";
+const SOCKS_ONION_PARTIAL_RELAY_IDLE_TIMEOUT_ENV: &str =
+    "TORFAST_SOCKS_ONION_PARTIAL_RELAY_IDLE_TIMEOUT_MS";
 const SOCKS_NO_TOR_BYTE_RELAY_TIMEOUT_ENV: &str =
     "TORFAST_SOCKS_NO_TOR_BYTE_RELAY_TIMEOUT_MS";
 const SOCKS_CONNECT_SOFT_TIMEOUT_MIN_MS: u64 = 500;
@@ -1255,10 +1430,15 @@ std::env::var(SOCKS_CONNECT_SOFT_TIMEOUT_ENV)
 Err(_) => None
 std::env::var(SOCKS_CONNECT_SOFT_TIMEOUT_ATTEMPTS_ENV)
 std::env::var(SOCKS_PARTIAL_RELAY_IDLE_TIMEOUT_ENV)
+std::env::var(SOCKS_ONION_PARTIAL_RELAY_IDLE_TIMEOUT_ENV)
 std::env::var(SOCKS_NO_TOR_BYTE_RELAY_TIMEOUT_ENV)
 fn torfast_socks_relay_byte_timing() -> bool {}
 fn torfast_socks_tor_to_client_coalesce_bytes() -> Option<usize> {}
 fn torfast_socks_partial_relay_idle_timeout() -> Option<Duration> {}
+fn torfast_socks_onion_partial_relay_idle_timeout() -> Option<Duration> {}
+torfast_socks_partial_relay_idle_timeout_from_env_value(None)
+torfast_socks_onion_partial_relay_idle_timeout_from_env_value(None)
+onion_partial_relay_idle_timeout_is_default_off_and_bounded
 fn torfast_socks_no_tor_byte_relay_timeout() -> Option<Duration> {}
 std::env::var(SOCKS_RELAY_BYTE_TIMING_ENV)
 std::env::var(SOCKS_TOR_TO_CLIENT_COALESCE_BYTES_ENV)
@@ -1328,14 +1508,38 @@ class ArtiQualityConfigTests(unittest.TestCase):
 
         self.assertTrue(all(check.ok for check in checks))
 
+    def test_missing_advisory_check_does_not_fail_quality_proof(self) -> None:
+        sources = dict(GOOD_SOURCES)
+        sources["circmgr_preemptive"] = sources["circmgr_preemptive"].replace(
+            "TORFAST_PREEMPTIVE_443_CIRCS_ENV",
+            "TORFAST_PREEMPTIVE_443_CIRCS_ENV_MISSING",
+        )
+
+        checks = evaluate_sources(sources=sources, help_text="proxy help")
+        failed = {check.name: check for check in checks if not check.ok}
+
+        self.assertIn(
+            "preemptive_443_override_is_default_on_with_env_off_and_bounded",
+            failed,
+        )
+        self.assertFalse(
+            failed[
+                "preemptive_443_override_is_default_on_with_env_off_and_bounded"
+            ].required_for_quality_proof
+        )
+        self.assertEqual([], [check.name for check in blocking_failures(checks)])
+
     def test_rejects_changed_ipv4_subnet_default(self) -> None:
         sources = dict(GOOD_SOURCES)
         sources["config"] = sources["config"].replace("16", "24", 1)
 
         checks = evaluate_sources(sources=sources, help_text=None)
-        failed = [check.name for check in checks if not check.ok]
+        failed = {check.name: check for check in checks if not check.ok}
 
         self.assertIn("default_ipv4_subnet_family_prefix_is_16", failed)
+        self.assertTrue(
+            failed["default_ipv4_subnet_family_prefix_is_16"].required_for_quality_proof
+        )
 
 
 if __name__ == "__main__":

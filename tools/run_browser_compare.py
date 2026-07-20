@@ -40,12 +40,12 @@ URLS = [
     "https://www.torproject.org/",
 ]
 
-
 REQUIRED_DEFAULT_PREFS = {
     "browser.privatebrowsing.autostart": True,
     "extensions.torbutton.use_nontor_proxy": False,
     "network.dns.disabled": True,
     "network.http.http3.enable": False,
+    "network.http.tailing.enabled": True,
     "network.proxy.allow_bypass": False,
     "network.proxy.failover_direct": False,
     "network.proxy.no_proxies_on": "",
@@ -58,6 +58,100 @@ REQUIRED_DEFAULT_PREFS = {
 DEFAULT_PREF_KEYS = list(REQUIRED_DEFAULT_PREFS)
 BROWSER_QUALITY_PREF_KEYS = list(REQUIRED_DEFAULT_PREFS)
 ZERO_OFFSET_TIMEZONES = {None, "UTC", "Atlantic/Reykjavik"}
+
+# Fingerprint keys that must be identical between a fast-lane browser and a
+# stock-launched reference of the same build. Geometry-tracking keys
+# (inner/outer/screen/avail sizes, devicePixelRatio) and lane-dependent keys
+# (timezone spoof scope, webdriver, cookieEnabled) are excluded because they
+# vary with the window environment, not the browser configuration.
+STABLE_FINGERPRINT_REFERENCE_KEYS = (
+    "userAgent",
+    "platform",
+    "oscpu",
+    "language",
+    "languages",
+    "hardwareConcurrency",
+    "maxTouchPoints",
+    "doNotTrack",
+    "timezoneOffset",
+    "colorDepth",
+    "pixelDepth",
+    "reducedMotion",
+    "forcedColors",
+    "darkScheme",
+    "pluginsLength",
+    "mimeTypesLength",
+)
+
+# Shared collection body so the Marionette lane and the no-Marionette page
+# lane can never drift apart on what they observe.
+FINGERPRINT_SNAPSHOT_JS_BODY = r"""
+const nav = navigator;
+const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+let canvasProbe = null;
+try {
+  const probe = document.createElement("canvas");
+  probe.width = 16;
+  probe.height = 16;
+  const pctx = probe.getContext("2d");
+  pctx.fillStyle = "rgb(11,22,33)";
+  pctx.fillRect(0, 0, 16, 16);
+  const data = pctx.getImageData(0, 0, 16, 16).data;
+  let matches = 0;
+  const total = data.length / 4;
+  for (let i = 0; i < data.length; i += 4) {
+    if (data[i] === 11 && data[i + 1] === 22 && data[i + 2] === 33) matches += 1;
+  }
+  canvasProbe = {
+    total,
+    matches,
+    extractionBlocked: matches < total / 2,
+    error: null,
+  };
+} catch (err) {
+  canvasProbe = {
+    total: null,
+    matches: null,
+    extractionBlocked: true,
+    error: String(err),
+  };
+}
+const snapshot = {
+  userAgent: nav.userAgent || null,
+  platform: nav.platform || null,
+  oscpu: nav.oscpu || null,
+  language: nav.language || null,
+  languages: Array.isArray(nav.languages) ? Array.from(nav.languages) : [],
+  hardwareConcurrency:
+    Number.isFinite(nav.hardwareConcurrency) ? nav.hardwareConcurrency : null,
+  maxTouchPoints:
+    Number.isFinite(nav.maxTouchPoints) ? nav.maxTouchPoints : null,
+  webdriver: nav.webdriver === true,
+  doNotTrack: nav.doNotTrack ?? null,
+  cookieEnabled: nav.cookieEnabled ?? null,
+  timezone,
+  timezoneOffset: new Date().getTimezoneOffset(),
+  colorDepth: screen.colorDepth ?? null,
+  pixelDepth: screen.pixelDepth ?? null,
+  innerWidth: window.innerWidth ?? null,
+  innerHeight: window.innerHeight ?? null,
+  outerWidth: window.outerWidth ?? null,
+  outerHeight: window.outerHeight ?? null,
+  screenWidth: screen.width ?? null,
+  screenHeight: screen.height ?? null,
+  availWidth: screen.availWidth ?? null,
+  availHeight: screen.availHeight ?? null,
+  devicePixelRatio:
+    Number.isFinite(window.devicePixelRatio) ? window.devicePixelRatio : null,
+  reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  forcedColors: window.matchMedia("(forced-colors: active)").matches,
+  darkScheme: window.matchMedia("(prefers-color-scheme: dark)").matches,
+  pluginsLength: nav.plugins ? nav.plugins.length : null,
+  mimeTypesLength: nav.mimeTypes ? nav.mimeTypes.length : null,
+  pageUrl: String(window.location.href),
+  canvasProbe,
+};
+"""
 
 BROWSER_CONNECTION_PREF_KEYS = [
     "network.http.http3.enable",
@@ -148,6 +242,7 @@ BOOT_SIGNAL_SUBSTRINGS = (
     "torfast dirclient timing",
     "torfast channel open timing",
     "torfast circuit selection build failed",
+    "torfast hspool",
     "terminal summary",
     "warn",
 )
@@ -183,6 +278,16 @@ def main() -> int:
         "--skip-bundled-tor",
         action="store_true",
         help="omit the bundled Tor Browser tor profile from this focused run",
+    )
+    parser.add_argument(
+        "--skip-local-c-tor",
+        action="store_true",
+        help="omit the local C Tor profile from this focused run",
+    )
+    parser.add_argument(
+        "--skip-plain-arti",
+        action="store_true",
+        help="omit the plain arti_release_browser baseline from this focused run",
     )
     parser.add_argument(
         "--extra-c-tor-conflux-ux",
@@ -637,6 +742,54 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--arti-hspool-launch-parallelism",
+        type=int,
+        help=(
+            "use this hidden-service pool background launch width on the main "
+            "Arti profile"
+        ),
+    )
+    parser.add_argument(
+        "--arti-hspool-background-start-delay-ms",
+        type=int,
+        help=(
+            "use this hidden-service pool background startup delay in ms on "
+            "the main Arti profile"
+        ),
+    )
+    parser.add_argument(
+        "--arti-hspool-guarded-stem-target",
+        type=int,
+        help=(
+            "use this hidden-service guarded stem pool target on the main "
+            "Arti profile"
+        ),
+    )
+    parser.add_argument(
+        "--arti-hspool-guarded-stem-target-defer-post-bootstrap",
+        action="store_true",
+        help=(
+            "keep cold boot pinned to one guarded circuit until bootstrap "
+            "settles on the main Arti profile"
+        ),
+    )
+    parser.add_argument(
+        "--arti-hspool-on-demand-grace-ms",
+        type=int,
+        help=(
+            "use this hidden-service pool on-demand grace wait in ms on the "
+            "main Arti profile"
+        ),
+    )
+    parser.add_argument(
+        "--arti-hspool-on-demand-race-ms",
+        type=int,
+        help=(
+            "use this hidden-service pool on-demand race window in ms on the "
+            "main Arti profile"
+        ),
+    )
+    parser.add_argument(
         "--extra-arti-exit-select-parallelism",
         action="append",
         type=int,
@@ -742,6 +895,200 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-stream-scheduler-burst",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra Arti profile that keeps hidden-service "
+            "descriptor sharing and uses this established-stream DATA burst "
+            "cap; repeat for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-socks-tor-to-client-coalesce-bytes",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra Arti profile that keeps hidden-service "
+            "descriptor sharing and coalesces ready Tor-to-browser SOCKS "
+            "bytes up to this size before local write; repeat for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-bytes",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra Arti profile that keeps hidden-service "
+            "descriptor sharing and also drains ready Tor DATA cells into "
+            "each local stream read up to this size; repeat for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-reuse-max-active-streams",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra Arti profile that keeps hidden-service "
+            "descriptor sharing but closes a cached hidden-service tunnel "
+            "instead of reusing it once active streams reach this cap; "
+            "repeat for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-combo",
+        action="append",
+        default=[],
+        help=(
+            "start one extra Arti profile that keeps hidden-service "
+            "descriptor sharing, drains ready Tor DATA cells into each local "
+            "stream read up to COALESCE_BYTES, and only enables that on hops "
+            "at or after MIN_HOP; use COALESCE_BYTES:MIN_HOP and repeat for "
+            "more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-start-backlog-combo",
+        action="append",
+        default=[],
+        help=(
+            "start one extra Arti profile that keeps hidden-service "
+            "descriptor sharing, drains ready Tor DATA cells into each local "
+            "stream read up to COALESCE_BYTES, only enables that on hops at "
+            "or after MIN_HOP, and only starts batching once queued DATA "
+            "backlog reaches START_BACKLOG_BYTES; use "
+            "COALESCE_BYTES:MIN_HOP:START_BACKLOG_BYTES and repeat for more "
+            "profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-busy-max-combo",
+        action="append",
+        default=[],
+        help=(
+            "start one extra Arti profile that keeps hidden-service "
+            "descriptor sharing, drains ready Tor DATA cells into each local "
+            "stream read up to COALESCE_BYTES, only enables that on hops at "
+            "or after MIN_HOP, and caps busy multi-stream fanout reads at "
+            "BUSY_MAX_BYTES; use COALESCE_BYTES:MIN_HOP:BUSY_MAX_BYTES and "
+            "repeat for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-rendezvous-establish-timeout-floor-ms",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra Arti profile that keeps hidden-service "
+            "descriptor sharing and only raises the rendezvous-established "
+            "wait timeout floor to this many ms; repeat for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-rendezvous-establish-timeout-floor-combo",
+        action="append",
+        default=[],
+        help=(
+            "start one extra Arti profile that keeps hidden-service "
+            "descriptor sharing, drains ready Tor DATA cells into each local "
+            "stream read up to COALESCE_BYTES only on hops at or after "
+            "MIN_HOP, and only raises the rendezvous-established wait timeout "
+            "floor to TIMEOUT_FLOOR_MS; use "
+            "COALESCE_BYTES:MIN_HOP:TIMEOUT_FLOOR_MS and repeat for more "
+            "profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-rend-prebuild-before-desc-shared-cache",
+        action="store_true",
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "rendezvous prebuild-before-descriptor with descriptor sharing "
+            "across same-onion same-key state records"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only",
+        action="store_true",
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "descriptor sharing with rendezvous prebuild-before-descriptor "
+            "only when the descriptor came from the shared cache"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only-stream-ready-data-coalesce-bytes",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra Arti profile that keeps the shared-cache-hit-only "
+            "hidden-service lane, and also drains ready Tor DATA cells into "
+            "each local stream read up to this size; repeat for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only-guarded-stem-target",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra Arti profile that keeps the shared-cache-hit-only "
+            "hidden-service rendezvous-prebuild family, but overrides the "
+            "guarded stem target to this value; repeat for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only-cold-late-ms",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra Arti profile that keeps shared-cache-hit-only "
+            "hidden-service rendezvous prebuild, and also arms a bounded late "
+            "cold-descriptor rendezvous prebuild after the descriptor stream "
+            "is ready; repeat for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only-reuse-max-active-streams",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra Arti profile that keeps the shared-cache-hit-only "
+            "lane, but stops busy HS tunnel cache-hit reuse at this active-"
+            "stream count; repeat for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only-reuse-max-active-streams-startup-only-hsdir-extend-timeout-cap-combo",
+        action="append",
+        default=[],
+        help=(
+            "start one extra Arti profile that keeps the shared-cache-hit-only "
+            "reuse-cap lane, and also applies a startup-only HSDir extend "
+            "timeout cap; use MAX_ACTIVE_STREAMS:TIMEOUT_CAP_MS and repeat "
+            "for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only-reuse-max-active-streams-cold-late-combo",
+        action="append",
+        default=[],
+        help=(
+            "start one extra Arti profile that keeps the shared-cache-hit-only "
+            "reuse-cap lane, and also arms bounded cold-late rendezvous "
+            "prebuild after descriptor stream ready; use "
+            "MAX_ACTIVE_STREAMS:TIMEOUT_MS and repeat for more profiles"
+        ),
+    )
+    parser.add_argument(
         "--extra-arti-hs-intro-circuit-hedge-ms",
         action="append",
         type=int,
@@ -749,6 +1096,177 @@ def main() -> int:
         help=(
             "start one extra Arti profile that hedges hidden-service intro "
             "circuit acquisition after this many ms; repeat for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-intro-circuit-hedge-ms",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "descriptor sharing with intro circuit acquisition hedge after "
+            "this many ms; repeat for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-hsdir-extend-timeout-cap-ms",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "descriptor sharing with client HSDir extend timeout cap; repeat "
+            "for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-hsdir-extend-timeout-cap-startup-only-ms",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "descriptor sharing with client HSDir extend timeout cap during "
+            "startup only, then restores the normal cap after bootstrap; "
+            "repeat for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-hsdir-extend-timeout-cap-post-boot-only-ms",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "descriptor sharing with client HSDir extend timeout cap only "
+            "after bootstrap, leaving startup on the normal timeout; repeat "
+            "for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-hspool-on-demand-race-ms",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "descriptor sharing with hidden-service pool on-demand race for "
+            "this many ms; repeat for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-ms",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "descriptor sharing, hidden-service pool on-demand race, and "
+            "demand-start background pool launch; repeat for more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-hspool-background-start-on-demand",
+        action="store_true",
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "descriptor sharing with demand-start background pool launch"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-hspool-background-start-on-demand-hsdir-extend-timeout-cap-startup-only-ms",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "descriptor sharing, demand-start background pool launch, and "
+            "client HSDir extend timeout cap during startup only; repeat for "
+            "more profiles"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-background-build-timeout-cap-combo",
+        action="append",
+        default=[],
+        metavar="RACE_MS:TIMEOUT_CAP_MS",
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "descriptor sharing, hidden-service pool on-demand race, "
+            "demand-start background pool launch, and hidden-service pool "
+            "background build timeout cap; for example 50:3000"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-hsdir-extend-timeout-cap-combo",
+        action="append",
+        default=[],
+        metavar="RACE_MS:TIMEOUT_CAP_MS",
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "descriptor sharing, hidden-service pool on-demand race, "
+            "demand-start background pool launch, and client HSDir extend "
+            "timeout cap; for example 50:3000"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-hsdir-extend-timeout-cap-guarded-stem-target-defer-post-bootstrap-combo",
+        action="append",
+        default=[],
+        metavar="RACE_MS:TIMEOUT_CAP_MS:GUARDED_STEM_TARGET",
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "descriptor sharing, hidden-service pool on-demand race, "
+            "demand-start background pool launch, client HSDir extend timeout "
+            "cap, and deferred guarded pool target; for example 50:2000:4"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-intro-circuit-hedge-combo",
+        action="append",
+        default=[],
+        metavar="RACE_MS:HEDGE_MS",
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "descriptor sharing, hidden-service pool on-demand race, "
+            "demand-start background pool launch, and intro-circuit hedge; "
+            "for example 50:500"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-delay-combo",
+        action="append",
+        default=[],
+        metavar="RACE_MS:START_DELAY_MS",
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "descriptor sharing, hidden-service pool on-demand race, and "
+            "hidden-service pool background-start delay; for example 50:5000"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-delay-launch-parallelism-combo",
+        action="append",
+        default=[],
+        metavar="RACE_MS:START_DELAY_MS:LAUNCH_PARALLELISM",
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "descriptor sharing, hidden-service pool on-demand race, "
+            "hidden-service pool background-start delay, and hidden-service "
+            "pool launch width; for example 50:5000:2"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-delay-guarded-stem-target-defer-post-bootstrap-combo",
+        action="append",
+        default=[],
+        metavar="RACE_MS:START_DELAY_MS:GUARDED_STEM_TARGET",
+        help=(
+            "start one extra Arti profile that combines hidden-service "
+            "descriptor sharing, hidden-service pool on-demand race, "
+            "hidden-service pool background-start delay, and deferred "
+            "guarded-pool backfill after bootstrap; for example 50:5000:2"
         ),
     )
     parser.add_argument(
@@ -944,6 +1462,18 @@ def main() -> int:
             "start one extra same-window Arti profile with the directory "
             "source-spread/pending-spread/early-usable combo plus "
             "partial-response retry chunking, but without load-aware selection"
+        ),
+    )
+    parser.add_argument(
+        "--extra-arti-dir-microdesc-source-spread-pending-spread-early-usable-partial-retry-chunking-bad-health-replacement-gate",
+        action="append",
+        default=[],
+        metavar="GAP_MS:MIN_ASSIGNED:MIN_ACTIVE",
+        help=(
+            "start one extra same-window Arti profile with the no-load-aware "
+            "partial-retry directory combo plus a targeted dir-microdesc "
+            "bad-health suppression gate using GAP_MS:MIN_ASSIGNED:MIN_ACTIVE; "
+            "repeat for more profiles"
         ),
     )
     parser.add_argument(
@@ -1383,6 +1913,17 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--extra-arti-exit-select-health-aware-same-isolation-prefer-cold-prewarm-target",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "start one extra health-aware same-isolation prefer-cold profile "
+            "with first-stream prewarm, without the bad-health guard; repeat "
+            "for more profiles"
+        ),
+    )
+    parser.add_argument(
         "--extra-arti-exit-select-health-aware-same-isolation-prefer-cold-prewarm-pending-wait",
         action="append",
         default=[],
@@ -1445,11 +1986,17 @@ def main() -> int:
     if not browser_bin.exists():
         print(f"browser binary not found: {browser_bin}", file=sys.stderr)
         return 2
-    if not tor_bin.exists():
+    if not args.skip_local_c_tor and not tor_bin.exists():
         print(f"tor binary not found: {tor_bin}", file=sys.stderr)
         return 2
     if not arti_bin.exists():
         print(f"arti binary not found: {arti_bin}", file=sys.stderr)
+        return 2
+    if args.skip_local_c_tor and args.extra_c_tor_conflux_ux:
+        print(
+            "--skip-local-c-tor cannot be combined with --extra-c-tor-conflux-ux",
+            file=sys.stderr,
+        )
         return 2
     if args.arti_exit_select_parallelism is not None and not (
         1 <= args.arti_exit_select_parallelism <= 8
@@ -1460,6 +2007,43 @@ def main() -> int:
         1 <= args.arti_exit_launch_parallelism <= 4
     ):
         print("--arti-exit-launch-parallelism must be between 1 and 4", file=sys.stderr)
+        return 2
+    if args.arti_hspool_launch_parallelism is not None and not (
+        1 <= args.arti_hspool_launch_parallelism <= 4
+    ):
+        print("--arti-hspool-launch-parallelism must be between 1 and 4", file=sys.stderr)
+        return 2
+    if args.arti_hspool_background_start_delay_ms is not None and not (
+        0 <= args.arti_hspool_background_start_delay_ms <= 60_000
+    ):
+        print(
+            "--arti-hspool-background-start-delay-ms must be between 0 and 60000",
+            file=sys.stderr,
+        )
+        return 2
+    if args.arti_hspool_guarded_stem_target is not None and not (
+        2 <= args.arti_hspool_guarded_stem_target <= 16
+    ):
+        print(
+            "--arti-hspool-guarded-stem-target must be between 2 and 16",
+            file=sys.stderr,
+        )
+        return 2
+    if args.arti_hspool_on_demand_grace_ms is not None and not (
+        1 <= args.arti_hspool_on_demand_grace_ms <= 1000
+    ):
+        print(
+            "--arti-hspool-on-demand-grace-ms must be between 1 and 1000",
+            file=sys.stderr,
+        )
+        return 2
+    if args.arti_hspool_on_demand_race_ms is not None and not (
+        1 <= args.arti_hspool_on_demand_race_ms <= 1000
+    ):
+        print(
+            "--arti-hspool-on-demand-race-ms must be between 1 and 1000",
+            file=sys.stderr,
+        )
         return 2
     if args.arti_min_exit_circs_for_port is not None and not (
         1 <= args.arti_min_exit_circs_for_port <= 4
@@ -1586,6 +2170,20 @@ def main() -> int:
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    try:
+        extra_dir_no_load_partial_retry_chunk_bad_health_gate_combos = (
+            parse_dir_bad_health_gate_combos(
+                args.extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_partial_retry_chunking_bad_health_replacement_gate,
+                option=(
+                    "--extra-arti-dir-microdesc-source-spread-pending-spread-"
+                    "early-usable-partial-retry-chunking-bad-health-"
+                    "replacement-gate"
+                ),
+            )
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     if args.arti_dirclient_read_timeout_ms is not None and not (
         2_000 <= args.arti_dirclient_read_timeout_ms <= 10_000
     ):
@@ -1593,6 +2191,75 @@ def main() -> int:
             "--arti-dirclient-read-timeout-ms must be between 2000 and 10000",
             file=sys.stderr,
         )
+        return 2
+    try:
+        extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_background_build_timeout_cap_combos = (
+            parse_hs_desc_shared_cache_hspool_race_background_start_on_demand_timeout_cap_combos(
+                args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_background_build_timeout_cap_combo,
+                option=(
+                    "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-background-build-timeout-cap-combo"
+                ),
+            )
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_combos = (
+            parse_hs_desc_shared_cache_hspool_race_background_start_on_demand_timeout_cap_combos(
+                args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_combo,
+                option=(
+                    "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-hsdir-extend-timeout-cap-combo"
+                ),
+            )
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_boot_combos = (
+            parse_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_boot_combos(
+                args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_bootstrap_combo
+            )
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge_combos = (
+            parse_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge_combos(
+                args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge_combo
+            )
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        extra_hs_desc_shared_cache_hspool_race_background_start_delay_combos = (
+            parse_hs_desc_shared_cache_hspool_race_background_start_delay_combos(
+                args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_combo
+            )
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        extra_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism_combos = (
+            parse_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism_combos(
+                args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism_combo
+            )
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        extra_hs_desc_shared_cache_hspool_race_background_start_delay_guarded_stem_target_defer_post_boot_combos = (
+            parse_hs_desc_shared_cache_hspool_race_background_start_delay_guarded_stem_target_defer_post_boot_combos(
+                args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_guarded_stem_target_defer_post_bootstrap_combo
+            )
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
         return 2
     try:
         extra_soft_timeout_combos = parse_soft_timeout_combos(
@@ -1981,6 +2648,425 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    invalid_extra_hs_desc_shared_cache_intro_circuit_hedge = [
+        value
+        for value in args.extra_arti_hs_desc_shared_cache_intro_circuit_hedge_ms
+        if not (500 <= value <= 60000)
+    ]
+    if invalid_extra_hs_desc_shared_cache_intro_circuit_hedge:
+        print(
+            "--extra-arti-hs-desc-shared-cache-intro-circuit-hedge-ms must "
+            "be between 500 and 60000",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_rend_prebuild_shared_hit_only_cold_late = [
+        value
+        for value in (
+            args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_cold_late_ms
+        )
+        if not (100 <= value <= 5000)
+    ]
+    invalid_extra_hs_rend_prebuild_shared_hit_only_stream_ready_data_coalesce = [
+        value
+        for value in (
+            args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_stream_ready_data_coalesce_bytes
+        )
+        if not (498 <= value <= 65536)
+    ]
+    try:
+        extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos = (
+            parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos(
+                args.extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combo
+            )
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos = (
+            parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos(
+                args.extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combo
+            )
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos = (
+            parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos(
+                args.extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combo
+            )
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos = (
+            parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos(
+                args.extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combo
+            )
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    invalid_extra_hs_desc_shared_cache_rendezvous_establish_timeout_floors = [
+        value
+        for value in (
+            args.extra_arti_hs_desc_shared_cache_rendezvous_establish_timeout_floor_ms
+        )
+        if not (500 <= value <= 60000)
+    ]
+    invalid_extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos = [
+        combo
+        for combo in (
+            extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos
+        )
+        if not (498 <= combo[0] <= 65536 and 1 <= combo[1] <= 16)
+    ]
+    invalid_extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos = [
+        combo
+        for combo in (
+            extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos
+        )
+        if not (
+            498 <= combo[0] <= 65536
+            and 1 <= combo[1] <= 16
+            and 498 <= combo[2] <= 65536
+        )
+    ]
+    invalid_extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos = [
+        combo
+        for combo in (
+            extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos
+        )
+        if not (
+            498 <= combo[0] <= 65536
+            and 1 <= combo[1] <= 16
+            and 498 <= combo[2] <= 65536
+        )
+    ]
+    invalid_extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos = [
+        combo
+        for combo in (
+            extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos
+        )
+        if not (
+            498 <= combo[0] <= 65536
+            and 1 <= combo[1] <= 16
+            and 500 <= combo[2] <= 60000
+        )
+    ]
+    invalid_extra_hs_rend_prebuild_shared_hit_only_guarded_target = [
+        value
+        for value in (
+            args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_guarded_stem_target
+        )
+        if not (2 <= value <= 16)
+    ]
+    invalid_extra_hs_rend_prebuild_shared_hit_only_reuse_max_active_streams = [
+        value
+        for value in (
+            args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams
+        )
+        if not (1 <= value <= 8)
+    ]
+    if invalid_extra_hs_rend_prebuild_shared_hit_only_guarded_target:
+        print(
+            "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only-guarded-stem-target must be between 2 and 16",
+            file=sys.stderr,
+        )
+        return 2
+    if invalid_extra_hs_rend_prebuild_shared_hit_only_reuse_max_active_streams:
+        print(
+            "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only-reuse-max-active-streams must be between 1 and 8",
+            file=sys.stderr,
+        )
+        return 2
+    if invalid_extra_hs_rend_prebuild_shared_hit_only_stream_ready_data_coalesce:
+        print(
+            "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only-stream-ready-data-coalesce-bytes must be between 498 and 65536",
+            file=sys.stderr,
+        )
+        return 2
+    if invalid_extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos:
+        print(
+            "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-combo values must use COALESCE_BYTES 498..65536 and MIN_HOP 1..16",
+            file=sys.stderr,
+        )
+        return 2
+    if invalid_extra_hs_desc_shared_cache_rendezvous_establish_timeout_floors:
+        print(
+            "--extra-arti-hs-desc-shared-cache-rendezvous-establish-timeout-floor-ms must be between 500 and 60000",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        invalid_extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-start-backlog-combo values must use COALESCE_BYTES 498..65536, MIN_HOP 1..16, and START_BACKLOG_BYTES 498..65536",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        invalid_extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-busy-max-combo values must use COALESCE_BYTES 498..65536, MIN_HOP 1..16, and BUSY_MAX_BYTES 498..65536",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        invalid_extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-rendezvous-establish-timeout-floor-combo values must use COALESCE_BYTES 498..65536, MIN_HOP 1..16, and TIMEOUT_FLOOR_MS 500..60000",
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        extra_hs_shared_hit_only_reuse_hsdir_extend_timeout_cap_combos = (
+            parse_hs_shared_hit_only_reuse_hsdir_extend_timeout_cap_combos(
+                args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_startup_only_hsdir_extend_timeout_cap_combo
+            )
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    try:
+        extra_hs_shared_hit_only_reuse_cold_late_combos = (
+            parse_hs_shared_hit_only_reuse_cold_late_combos(
+                args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_cold_late_combo
+            )
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    invalid_extra_hs_shared_hit_only_reuse_hsdir_extend_timeout_cap_combos = [
+        (max_active_streams, timeout_cap_ms)
+        for max_active_streams, timeout_cap_ms in (
+            extra_hs_shared_hit_only_reuse_hsdir_extend_timeout_cap_combos
+        )
+        if not (1 <= max_active_streams <= 8) or not (500 <= timeout_cap_ms <= 10_000)
+    ]
+    invalid_extra_hs_shared_hit_only_reuse_cold_late_combos = [
+        (max_active_streams, timeout_ms)
+        for max_active_streams, timeout_ms in (
+            extra_hs_shared_hit_only_reuse_cold_late_combos
+        )
+        if not (1 <= max_active_streams <= 8) or not (100 <= timeout_ms <= 5_000)
+    ]
+    if invalid_extra_hs_shared_hit_only_reuse_hsdir_extend_timeout_cap_combos:
+        print(
+            "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only-reuse-max-active-streams-startup-only-hsdir-extend-timeout-cap-combo values must be MAX_ACTIVE_STREAMS 1..8 and TIMEOUT_CAP_MS 500..10000",
+            file=sys.stderr,
+        )
+        return 2
+    if invalid_extra_hs_shared_hit_only_reuse_cold_late_combos:
+        print(
+            "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only-reuse-max-active-streams-cold-late-combo values must be MAX_ACTIVE_STREAMS 1..8 and TIMEOUT_MS 100..5000",
+            file=sys.stderr,
+        )
+        return 2
+    if invalid_extra_hs_rend_prebuild_shared_hit_only_cold_late:
+        print(
+            "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only-cold-late-ms must be between 100 and 5000",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_desc_shared_cache_hsdir_extend_timeout_cap = [
+        value
+        for value in args.extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_ms
+        if not (500 <= value <= 10_000)
+    ]
+    if invalid_extra_hs_desc_shared_cache_hsdir_extend_timeout_cap:
+        print(
+            "--extra-arti-hs-desc-shared-cache-hsdir-extend-timeout-cap-ms must be between 500 and 10000",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_desc_shared_cache_hsdir_extend_timeout_cap_startup_only = [
+        value
+        for value in (
+            args.extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_startup_only_ms
+        )
+        if not (500 <= value <= 10_000)
+    ]
+    if invalid_extra_hs_desc_shared_cache_hsdir_extend_timeout_cap_startup_only:
+        print(
+            "--extra-arti-hs-desc-shared-cache-hsdir-extend-timeout-cap-startup-only-ms must be between 500 and 10000",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_desc_shared_cache_hsdir_extend_timeout_cap_post_boot_only = [
+        value
+        for value in (
+            args.extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_post_boot_only_ms
+        )
+        if not (500 <= value <= 10_000)
+    ]
+    if invalid_extra_hs_desc_shared_cache_hsdir_extend_timeout_cap_post_boot_only:
+        print(
+            "--extra-arti-hs-desc-shared-cache-hsdir-extend-timeout-cap-post-boot-only-ms must be between 500 and 10000",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_desc_shared_cache_hspool_background_start_on_demand_hsdir_extend_timeout_cap_startup_only = [
+        value
+        for value in (
+            args.extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand_hsdir_extend_timeout_cap_startup_only_ms
+        )
+        if not (500 <= value <= 10_000)
+    ]
+    if (
+        invalid_extra_hs_desc_shared_cache_hspool_background_start_on_demand_hsdir_extend_timeout_cap_startup_only
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-background-start-on-demand-hsdir-extend-timeout-cap-startup-only-ms must be between 500 and 10000",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_desc_shared_cache_hspool_race = [
+        value
+        for value in args.extra_arti_hs_desc_shared_cache_hspool_on_demand_race_ms
+        if not (1 <= value <= 1000)
+    ]
+    if invalid_extra_hs_desc_shared_cache_hspool_race:
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-on-demand-race-ms must "
+            "be between 1 and 1000",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_desc_shared_cache_hspool_race_background_start_on_demand = [
+        value
+        for value in (
+            args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_ms
+        )
+        if not (1 <= value <= 1000)
+    ]
+    if invalid_extra_hs_desc_shared_cache_hspool_race_background_start_on_demand:
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-ms must be between 1 and 1000",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_background_build_timeout_cap = [
+        (race_ms, timeout_cap_ms)
+        for race_ms, timeout_cap_ms in (
+            extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_background_build_timeout_cap_combos
+        )
+        if not (1 <= race_ms <= 1000 and 500 <= timeout_cap_ms <= 10_000)
+    ]
+    if (
+        invalid_extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_background_build_timeout_cap
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-background-build-timeout-cap-combo values must be RACE_MS 1..1000 and TIMEOUT_CAP_MS 500..10000",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap = [
+        (race_ms, timeout_cap_ms)
+        for race_ms, timeout_cap_ms in (
+            extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_combos
+        )
+        if not (1 <= race_ms <= 1000 and 500 <= timeout_cap_ms <= 10_000)
+    ]
+    if (
+        invalid_extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-hsdir-extend-timeout-cap-combo values must be RACE_MS 1..1000 and TIMEOUT_CAP_MS 500..10000",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_boot = [
+        (race_ms, timeout_cap_ms, guarded_stem_target)
+        for race_ms, timeout_cap_ms, guarded_stem_target in (
+            extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_boot_combos
+        )
+        if not (
+            1 <= race_ms <= 1000
+            and 500 <= timeout_cap_ms <= 10000
+            and 2 <= guarded_stem_target <= 16
+        )
+    ]
+    if (
+        invalid_extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_boot
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-hsdir-extend-timeout-cap-guarded-stem-target-defer-post-bootstrap-combo values must be RACE_MS 1..1000, TIMEOUT_CAP_MS 500..10000, and GUARDED_STEM_TARGET 2..16",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge = [
+        (race_ms, hedge_ms)
+        for race_ms, hedge_ms in (
+            extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge_combos
+        )
+        if not (1 <= race_ms <= 1000 and 500 <= hedge_ms <= 60000)
+    ]
+    if (
+        invalid_extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-intro-circuit-hedge-combo values must be RACE_MS 1..1000 and HEDGE_MS 500..60000",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_desc_shared_cache_hspool_race_background_start_delay = [
+        (race_ms, delay_ms)
+        for race_ms, delay_ms in (
+            extra_hs_desc_shared_cache_hspool_race_background_start_delay_combos
+        )
+        if not (1 <= race_ms <= 1000 and 0 <= delay_ms <= 60000)
+    ]
+    if invalid_extra_hs_desc_shared_cache_hspool_race_background_start_delay:
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-delay-combo values must be RACE_MS 1..1000 and START_DELAY_MS 0..60000",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism = [
+        (race_ms, delay_ms, parallelism)
+        for race_ms, delay_ms, parallelism in (
+            extra_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism_combos
+        )
+        if not (
+            1 <= race_ms <= 1000
+            and 0 <= delay_ms <= 60000
+            and 1 <= parallelism <= 4
+        )
+    ]
+    if (
+        invalid_extra_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-delay-launch-parallelism-combo values must be RACE_MS 1..1000, START_DELAY_MS 0..60000, and LAUNCH_PARALLELISM 1..4",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_desc_shared_cache_hspool_race_background_start_delay_guarded_stem_target_defer_post_boot = [
+        (race_ms, delay_ms, guarded_stem_target)
+        for race_ms, delay_ms, guarded_stem_target in (
+            extra_hs_desc_shared_cache_hspool_race_background_start_delay_guarded_stem_target_defer_post_boot_combos
+        )
+        if not (
+            1 <= race_ms <= 1000
+            and 0 <= delay_ms <= 60000
+            and 2 <= guarded_stem_target <= 16
+        )
+    ]
+    if (
+        invalid_extra_hs_desc_shared_cache_hspool_race_background_start_delay_guarded_stem_target_defer_post_boot
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-delay-guarded-stem-target-defer-post-bootstrap-combo values must be RACE_MS 1..1000, START_DELAY_MS 0..60000, and GUARDED_STEM_TARGET 2..16",
+            file=sys.stderr,
+        )
+        return 2
     invalid_extra_min_exit_circs = [
         value
         for value in args.extra_arti_min_exit_circs_for_port
@@ -2321,6 +3407,19 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    invalid_extra_health_aware_prefer_cold_same_isolation_prewarm_targets = [
+        value
+        for value in (
+            args.extra_arti_exit_select_health_aware_same_isolation_prefer_cold_prewarm_target
+        )
+        if not (2 <= value <= 4)
+    ]
+    if invalid_extra_health_aware_prefer_cold_same_isolation_prewarm_targets:
+        print(
+            "--extra-arti-exit-select-health-aware-same-isolation-prefer-cold-prewarm-target must be between 2 and 4",
+            file=sys.stderr,
+        )
+        return 2
     invalid_extra_unknown_fallback_prefer_cold_targets = [
         value
         for value in (
@@ -2412,9 +3511,231 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_stream_scheduler_burst
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-stream-scheduler-burst requires "
+            "--schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_rend_prebuild_before_desc_shared_cache
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-rend-prebuild-before-desc-shared-cache requires "
+            "--schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-"
+            "shared-hit-only requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_stream_ready_data_coalesce_bytes
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-"
+            "shared-hit-only-stream-ready-data-coalesce-bytes requires "
+            "--schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_guarded_stem_target
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-"
+            "shared-hit-only-guarded-stem-target requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_cold_late_ms
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-"
+            "shared-hit-only-cold-late-ms requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-"
+            "shared-hit-only-reuse-max-active-streams requires --schedule "
+            "interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_startup_only_hsdir_extend_timeout_cap_combo
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-"
+            "shared-hit-only-reuse-max-active-streams-startup-only-hsdir-"
+            "extend-timeout-cap-combo requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_cold_late_combo
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-"
+            "shared-hit-only-reuse-max-active-streams-cold-late-combo "
+            "requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
     if args.extra_arti_hs_intro_circuit_hedge_ms and args.schedule != "interleaved":
         print(
             "--extra-arti-hs-intro-circuit-hedge-ms requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_intro_circuit_hedge_ms
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-intro-circuit-hedge-ms "
+            "requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_ms
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hsdir-extend-timeout-cap-ms requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_startup_only_ms
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hsdir-extend-timeout-cap-startup-only-ms requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_post_boot_only_ms
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hsdir-extend-timeout-cap-post-boot-only-ms requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-background-start-on-demand requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand_hsdir_extend_timeout_cap_startup_only_ms
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-background-start-on-demand-hsdir-extend-timeout-cap-startup-only-ms requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_hspool_on_demand_race_ms
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-on-demand-race-ms "
+            "requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_ms
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-ms requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_background_build_timeout_cap_combo
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-background-build-timeout-cap-combo requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_combo
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-hsdir-extend-timeout-cap-combo requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_bootstrap_combo
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-hsdir-extend-timeout-cap-guarded-stem-target-defer-post-bootstrap-combo requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge_combo
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-intro-circuit-hedge-combo requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_combo
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-delay-combo requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism_combo
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-delay-launch-parallelism-combo requires --schedule interleaved",
             file=sys.stderr,
         )
         return 2
@@ -2511,6 +3832,15 @@ def main() -> int:
     ):
         print(
             "--extra-arti-dir-microdesc-source-spread-pending-spread-early-usable-load-aware-partial-retry-chunking-bad-health-replacement-gate requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_partial_retry_chunking_bad_health_replacement_gate
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-dir-microdesc-source-spread-pending-spread-early-usable-partial-retry-chunking-bad-health-replacement-gate requires --schedule interleaved",
             file=sys.stderr,
         )
         return 2
@@ -2761,6 +4091,15 @@ def main() -> int:
         )
         return 2
     if (
+        args.extra_arti_exit_select_health_aware_same_isolation_prefer_cold_prewarm_target
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-exit-select-health-aware-same-isolation-prefer-cold-prewarm-target requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
         extra_health_aware_sameiso_prefer_cold_prewarm_pending_wait_combos
         and args.schedule != "interleaved"
     ):
@@ -2953,6 +4292,15 @@ def main() -> int:
         )
         return 2
     if (
+        args.extra_arti_hs_desc_shared_cache_socks_tor_to_client_coalesce_bytes
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-socks-tor-to-client-coalesce-bytes requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
         args.extra_arti_stream_ready_data_coalesce_bytes
         and args.schedule != "interleaved"
     ):
@@ -2966,9 +4314,22 @@ def main() -> int:
         for value in args.extra_arti_socks_tor_to_client_coalesce_bytes
         if not (498 <= value <= 65_536)
     ]
+    invalid_extra_hs_desc_shared_cache_coalesce_bytes = [
+        value
+        for value in (
+            args.extra_arti_hs_desc_shared_cache_socks_tor_to_client_coalesce_bytes
+        )
+        if not (498 <= value <= 65_536)
+    ]
     if invalid_extra_coalesce_bytes:
         print(
             "--extra-arti-socks-tor-to-client-coalesce-bytes must be between 498 and 65536",
+            file=sys.stderr,
+        )
+        return 2
+    if invalid_extra_hs_desc_shared_cache_coalesce_bytes:
+        print(
+            "--extra-arti-hs-desc-shared-cache-socks-tor-to-client-coalesce-bytes must be between 498 and 65536",
             file=sys.stderr,
         )
         return 2
@@ -3005,6 +4366,100 @@ def main() -> int:
     if invalid_extra_stream_scheduler_bursts:
         print(
             "--extra-arti-stream-scheduler-burst must be between 1 and 8",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_desc_shared_cache_stream_scheduler_bursts = [
+        value
+        for value in args.extra_arti_hs_desc_shared_cache_stream_scheduler_burst
+        if not (1 <= value <= 8)
+    ]
+    if invalid_extra_hs_desc_shared_cache_stream_scheduler_bursts:
+        print(
+            "--extra-arti-hs-desc-shared-cache-stream-scheduler-burst must be "
+            "between 1 and 8",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_bytes
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-bytes "
+            "requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_reuse_max_active_streams
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-reuse-max-active-streams "
+            "requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combo
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-combo requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_rendezvous_establish_timeout_floor_ms
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-rendezvous-establish-timeout-floor-ms requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combo
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-rendezvous-establish-timeout-floor-combo requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    if (
+        args.extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combo
+        and args.schedule != "interleaved"
+    ):
+        print(
+            "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-start-backlog-combo requires --schedule interleaved",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_desc_shared_cache_ready_data_coalesce_bytes = [
+        value
+        for value in (
+            args.extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_bytes
+        )
+        if not (498 <= value <= 65_536)
+    ]
+    if invalid_extra_hs_desc_shared_cache_ready_data_coalesce_bytes:
+        print(
+            "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-bytes "
+            "must be between 498 and 65536",
+            file=sys.stderr,
+        )
+        return 2
+    invalid_extra_hs_desc_shared_cache_reuse_max_active_streams = [
+        value
+        for value in args.extra_arti_hs_desc_shared_cache_reuse_max_active_streams
+        if not (1 <= value <= 8)
+    ]
+    if invalid_extra_hs_desc_shared_cache_reuse_max_active_streams:
+        print(
+            "--extra-arti-hs-desc-shared-cache-reuse-max-active-streams must "
+            "be between 1 and 8",
             file=sys.stderr,
         )
         return 2
@@ -3047,8 +4502,42 @@ def main() -> int:
         args.extra_arti_hs_rend_prebuild_before_desc
     ) + int(
         args.extra_arti_hs_desc_shared_cache
+    ) + int(
+        args.extra_arti_hs_rend_prebuild_before_desc_shared_cache
+    ) + int(
+        args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only
+    ) + len(
+        args.extra_arti_hs_desc_shared_cache_stream_scheduler_burst
+    ) + len(
+        args.extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_bytes
+    ) + len(
+        args.extra_arti_hs_desc_shared_cache_reuse_max_active_streams
+    ) + len(
+        extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos
+    ) + len(
+        extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos
+    ) + len(
+        args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams
+    ) + len(
+        args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_cold_late_ms
     ) + len(
         args.extra_arti_hs_intro_circuit_hedge_ms
+    ) + len(
+        args.extra_arti_hs_desc_shared_cache_intro_circuit_hedge_ms
+    ) + len(
+        args.extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_ms
+    ) + len(
+        args.extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_startup_only_ms
+    ) + len(
+        args.extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_post_boot_only_ms
+    ) + len(
+        args.extra_arti_hs_desc_shared_cache_hspool_on_demand_race_ms
+    ) + len(
+        extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge_combos
+    ) + len(
+        extra_hs_desc_shared_cache_hspool_race_background_start_delay_combos
+    ) + len(
+        extra_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism_combos
     ) + len(
         args.extra_arti_min_exit_circs_for_port
     ) + len(
@@ -3154,6 +4643,10 @@ def main() -> int:
     ) + len(
         args.extra_arti_proxy_app_buffer_len
     ) + len(
+        args.extra_arti_socks_tor_to_client_coalesce_bytes
+    ) + len(
+        args.extra_arti_stream_ready_data_coalesce_bytes
+    ) + len(
         args.extra_arti_stream_scheduler_burst
     ) + len(
         extra_arti_bins
@@ -3187,6 +4680,16 @@ def main() -> int:
         "arti_stream_scheduler_burst": args.arti_stream_scheduler_burst,
         "arti_exit_select_parallelism_override": args.arti_exit_select_parallelism,
         "arti_exit_launch_parallelism_override": args.arti_exit_launch_parallelism,
+        "arti_hspool_launch_parallelism": args.arti_hspool_launch_parallelism,
+        "arti_hspool_background_start_delay_ms": (
+            args.arti_hspool_background_start_delay_ms
+        ),
+        "arti_hspool_guarded_stem_target": args.arti_hspool_guarded_stem_target,
+        "arti_hspool_guarded_stem_target_defer_post_bootstrap": (
+            args.arti_hspool_guarded_stem_target_defer_post_bootstrap
+        ),
+        "arti_hspool_on_demand_grace_ms": args.arti_hspool_on_demand_grace_ms,
+        "arti_hspool_on_demand_race_ms": args.arti_hspool_on_demand_race_ms,
         "arti_min_exit_circs_for_port_override": args.arti_min_exit_circs_for_port,
         "arti_socks_connect_soft_timeout_ms": args.arti_socks_connect_soft_timeout_ms,
         "arti_socks_connect_soft_timeout_attempts": (
@@ -3282,9 +4785,174 @@ def main() -> int:
             args.extra_arti_hs_rend_prebuild_before_desc
         ),
         "extra_arti_hs_desc_shared_cache": args.extra_arti_hs_desc_shared_cache,
+        "extra_arti_hs_desc_shared_cache_stream_scheduler_burst": (
+            args.extra_arti_hs_desc_shared_cache_stream_scheduler_burst
+        ),
+        "extra_arti_hs_desc_shared_cache_socks_tor_to_client_coalesce_bytes": (
+            args.extra_arti_hs_desc_shared_cache_socks_tor_to_client_coalesce_bytes
+        ),
+        "extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_bytes": (
+            args.extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_bytes
+        ),
+        "extra_arti_hs_desc_shared_cache_reuse_max_active_streams": (
+            args.extra_arti_hs_desc_shared_cache_reuse_max_active_streams
+        ),
+        "extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos": [
+            [coalesce_bytes, min_hop]
+            for coalesce_bytes, min_hop in (
+                extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos
+            )
+        ],
+        "extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos": [
+            [coalesce_bytes, min_hop, start_backlog_bytes]
+            for coalesce_bytes, min_hop, start_backlog_bytes in (
+                extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos
+            )
+        ],
+        "extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos": [
+            [coalesce_bytes, min_hop, busy_max_bytes]
+            for coalesce_bytes, min_hop, busy_max_bytes in (
+                extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos
+            )
+        ],
+        "extra_arti_hs_desc_shared_cache_rendezvous_establish_timeout_floor_ms": (
+            args.extra_arti_hs_desc_shared_cache_rendezvous_establish_timeout_floor_ms
+        ),
+        "extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos": [
+            [coalesce_bytes, min_hop, timeout_floor_ms]
+            for coalesce_bytes, min_hop, timeout_floor_ms in (
+                extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos
+            )
+        ],
+        "extra_arti_hs_rend_prebuild_before_desc_shared_cache": (
+            args.extra_arti_hs_rend_prebuild_before_desc_shared_cache
+        ),
+        "extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only": (
+            args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only
+        ),
+        "extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_stream_ready_data_coalesce_bytes": (
+            args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_stream_ready_data_coalesce_bytes
+        ),
+        "extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams": (
+            args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams
+        ),
+        "extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_cold_late_combos": [
+            {
+                "max_active_streams": max_active_streams,
+                "timeout_ms": timeout_ms,
+            }
+            for max_active_streams, timeout_ms in (
+                extra_hs_shared_hit_only_reuse_cold_late_combos
+            )
+        ],
+        "extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_startup_only_hsdir_extend_timeout_cap_combos": [
+            {
+                "max_active_streams": max_active_streams,
+                "timeout_cap_ms": timeout_cap_ms,
+            }
+            for max_active_streams, timeout_cap_ms in (
+                extra_hs_shared_hit_only_reuse_hsdir_extend_timeout_cap_combos
+            )
+        ],
+        "extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_guarded_stem_target": (
+            args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_guarded_stem_target
+        ),
+        "extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_cold_late_ms": (
+            args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_cold_late_ms
+        ),
         "extra_arti_hs_intro_circuit_hedge_ms": (
             args.extra_arti_hs_intro_circuit_hedge_ms
         ),
+        "extra_arti_hs_desc_shared_cache_intro_circuit_hedge_ms": (
+            args.extra_arti_hs_desc_shared_cache_intro_circuit_hedge_ms
+        ),
+        "extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_ms": (
+            args.extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_ms
+        ),
+        "extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_startup_only_ms": (
+            args.extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_startup_only_ms
+        ),
+        "extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_post_boot_only_ms": (
+            args.extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_post_boot_only_ms
+        ),
+        "extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand": (
+            args.extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand
+        ),
+        "extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand_hsdir_extend_timeout_cap_startup_only_ms": (
+            args.extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand_hsdir_extend_timeout_cap_startup_only_ms
+        ),
+        "extra_arti_hs_desc_shared_cache_hspool_on_demand_race_ms": (
+            args.extra_arti_hs_desc_shared_cache_hspool_on_demand_race_ms
+        ),
+        "extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_ms": (
+            args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_ms
+        ),
+        "extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_background_build_timeout_cap_combos": [
+            {
+                "race_ms": race_ms,
+                "timeout_cap_ms": timeout_cap_ms,
+            }
+            for race_ms, timeout_cap_ms in (
+                extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_background_build_timeout_cap_combos
+            )
+        ],
+        "extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_combos": [
+            {
+                "race_ms": race_ms,
+                "timeout_cap_ms": timeout_cap_ms,
+            }
+            for race_ms, timeout_cap_ms in (
+                extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_combos
+            )
+        ],
+        "extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_boot_combos": [
+            {
+                "race_ms": race_ms,
+                "timeout_cap_ms": timeout_cap_ms,
+                "guarded_stem_target": guarded_stem_target,
+            }
+            for race_ms, timeout_cap_ms, guarded_stem_target in (
+                extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_boot_combos
+            )
+        ],
+        "extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge_combos": [
+            {
+                "race_ms": race_ms,
+                "hedge_ms": hedge_ms,
+            }
+            for race_ms, hedge_ms in (
+                extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge_combos
+            )
+        ],
+        "extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_combos": [
+            {
+                "race_ms": race_ms,
+                "background_start_delay_ms": delay_ms,
+            }
+            for race_ms, delay_ms in (
+                extra_hs_desc_shared_cache_hspool_race_background_start_delay_combos
+            )
+        ],
+        "extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism_combos": [
+            {
+                "race_ms": race_ms,
+                "background_start_delay_ms": delay_ms,
+                "launch_parallelism": parallelism,
+            }
+            for race_ms, delay_ms, parallelism in (
+                extra_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism_combos
+            )
+        ],
+        "extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_guarded_stem_target_defer_post_boot_combos": [
+            {
+                "race_ms": race_ms,
+                "background_start_delay_ms": delay_ms,
+                "guarded_stem_target": guarded_stem_target,
+            }
+            for race_ms, delay_ms, guarded_stem_target in (
+                extra_hs_desc_shared_cache_hspool_race_background_start_delay_guarded_stem_target_defer_post_boot_combos
+            )
+        ],
         "extra_arti_min_exit_circs_for_port": (
             args.extra_arti_min_exit_circs_for_port
         ),
@@ -3320,6 +4988,16 @@ def main() -> int:
             }
             for gap_ms, min_assigned_streams, min_active_streams in (
                 extra_dir_partial_retry_chunk_bad_health_gate_combos
+            )
+        ],
+        "extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_partial_retry_chunking_bad_health_replacement_gate_combos": [
+            {
+                "gap_ms": gap_ms,
+                "min_assigned_streams": min_assigned_streams,
+                "min_active_streams": min_active_streams,
+            }
+            for gap_ms, min_assigned_streams, min_active_streams in (
+                extra_dir_no_load_partial_retry_chunk_bad_health_gate_combos
             )
         ],
         "extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_load_aware_partial_retry_chunking_socks_connect_soft_timeout_combos": [
@@ -3439,6 +5117,9 @@ def main() -> int:
         ],
         "extra_arti_exit_select_prefer_cold_same_isolation_prewarm_target": (
             args.extra_arti_exit_select_prefer_cold_same_isolation_prewarm_target
+        ),
+        "extra_arti_exit_select_health_aware_same_isolation_prefer_cold_prewarm_target": (
+            args.extra_arti_exit_select_health_aware_same_isolation_prefer_cold_prewarm_target
         ),
         "extra_arti_exit_select_health_aware_same_isolation_prefer_cold_prewarm_pending_wait": [
             {"target": target, "wait_ms": wait_ms}
@@ -3680,6 +5361,16 @@ def main() -> int:
             arti_hs_rend_prebuild_before_desc=(
                 args.arti_hs_rend_prebuild_before_desc
             ),
+            arti_hspool_launch_parallelism=args.arti_hspool_launch_parallelism,
+            arti_hspool_background_start_delay_ms=(
+                args.arti_hspool_background_start_delay_ms
+            ),
+            arti_hspool_guarded_stem_target=args.arti_hspool_guarded_stem_target,
+            arti_hspool_guarded_stem_target_defer_post_boot=(
+                args.arti_hspool_guarded_stem_target_defer_post_bootstrap
+            ),
+            arti_hspool_on_demand_grace_ms=args.arti_hspool_on_demand_grace_ms,
+            arti_hspool_on_demand_race_ms=args.arti_hspool_on_demand_race_ms,
             arti_exit_select_prefer_cold_same_isolation=(
                 args.arti_exit_select_prefer_cold_same_isolation
             ),
@@ -3710,8 +5401,104 @@ def main() -> int:
                 args.extra_arti_hs_rend_prebuild_before_desc
             ),
             extra_arti_hs_desc_shared_cache=args.extra_arti_hs_desc_shared_cache,
+            extra_arti_hs_desc_shared_cache_stream_scheduler_burst=(
+                args.extra_arti_hs_desc_shared_cache_stream_scheduler_burst
+            ),
+            extra_arti_hs_desc_shared_cache_socks_tor_to_client_coalesce_bytes=(
+                args.extra_arti_hs_desc_shared_cache_socks_tor_to_client_coalesce_bytes
+            ),
+            extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_bytes=(
+                args.extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_bytes
+            ),
+            extra_arti_hs_desc_shared_cache_reuse_max_active_streams=(
+                args.extra_arti_hs_desc_shared_cache_reuse_max_active_streams
+            ),
+            extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos=(
+                extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos
+            ),
+            extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos=(
+                extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos
+            ),
+            extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos=(
+                extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos
+            ),
+            extra_arti_hs_desc_shared_cache_rendezvous_establish_timeout_floor_ms=(
+                args.extra_arti_hs_desc_shared_cache_rendezvous_establish_timeout_floor_ms
+            ),
+            extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos=(
+                extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos
+            ),
+            extra_arti_hs_rend_prebuild_before_desc_shared_cache=(
+                args.extra_arti_hs_rend_prebuild_before_desc_shared_cache
+            ),
+            extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only=(
+                args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only
+            ),
+            extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_stream_ready_data_coalesce_bytes=(
+                args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_stream_ready_data_coalesce_bytes
+            ),
+            extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams=(
+                args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams
+            ),
+            extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_cold_late_combos=(
+                extra_hs_shared_hit_only_reuse_cold_late_combos
+            ),
+            extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_startup_only_hsdir_extend_timeout_cap_combos=(
+                extra_hs_shared_hit_only_reuse_hsdir_extend_timeout_cap_combos
+            ),
+            extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_guarded_stem_target=(
+                args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_guarded_stem_target
+            ),
+            extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_cold_late_ms=(
+                args.extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_cold_late_ms
+            ),
             extra_arti_hs_intro_circuit_hedge_ms=(
                 args.extra_arti_hs_intro_circuit_hedge_ms
+            ),
+            extra_arti_hs_desc_shared_cache_intro_circuit_hedge_ms=(
+                args.extra_arti_hs_desc_shared_cache_intro_circuit_hedge_ms
+            ),
+            extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_ms=(
+                args.extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_ms
+            ),
+            extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_startup_only_ms=(
+                args.extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_startup_only_ms
+            ),
+            extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_post_boot_only_ms=(
+                args.extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_post_boot_only_ms
+            ),
+            extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand=(
+                args.extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand
+            ),
+            extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand_hsdir_extend_timeout_cap_startup_only_ms=(
+                args.extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand_hsdir_extend_timeout_cap_startup_only_ms
+            ),
+            extra_arti_hs_desc_shared_cache_hspool_on_demand_race_ms=(
+                args.extra_arti_hs_desc_shared_cache_hspool_on_demand_race_ms
+            ),
+            extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_ms=(
+                args.extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_ms
+            ),
+            extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_background_build_timeout_cap_combos=(
+                extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_background_build_timeout_cap_combos
+            ),
+            extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_combos=(
+                extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_combos
+            ),
+            extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_boot_combos=(
+                extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_boot_combos
+            ),
+            extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge_combos=(
+                extra_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge_combos
+            ),
+            extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_combos=(
+                extra_hs_desc_shared_cache_hspool_race_background_start_delay_combos
+            ),
+            extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism_combos=(
+                extra_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism_combos
+            ),
+            extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_guarded_stem_target_defer_post_boot_combos=(
+                extra_hs_desc_shared_cache_hspool_race_background_start_delay_guarded_stem_target_defer_post_boot_combos
             ),
             extra_arti_min_exit_circs_for_port=(
                 args.extra_arti_min_exit_circs_for_port
@@ -3795,6 +5582,9 @@ def main() -> int:
             extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_partial_retry_chunking=(
                 args.extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_partial_retry_chunking
             ),
+            extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_partial_retry_chunking_bad_health_replacement_gate_combos=(
+                extra_dir_no_load_partial_retry_chunk_bad_health_gate_combos
+            ),
             extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_partial_retry_chunking_max_active_streams=(
                 args.extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_partial_retry_chunking_max_active_streams
             ),
@@ -3840,6 +5630,9 @@ def main() -> int:
             ),
             extra_arti_exit_select_prefer_cold_same_isolation_prewarm_target=(
                 args.extra_arti_exit_select_prefer_cold_same_isolation_prewarm_target
+            ),
+            extra_arti_exit_select_health_aware_same_isolation_prefer_cold_prewarm_target=(
+                args.extra_arti_exit_select_health_aware_same_isolation_prefer_cold_prewarm_target
             ),
             extra_arti_exit_select_health_aware_same_isolation_prefer_cold_prewarm_pending_wait=(
                 extra_health_aware_sameiso_prefer_cold_prewarm_pending_wait_combos
@@ -3917,6 +5710,8 @@ def main() -> int:
             extra_arti_bins=extra_arti_bins,
             extra_arti_port_start=args.extra_arti_port_start,
             include_bundled_tor=not args.skip_bundled_tor,
+            include_local_c_tor=not args.skip_local_c_tor,
+            include_plain_arti=not args.skip_plain_arti,
             proxy_log_tail_lines=args.proxy_log_tail_lines,
             proxy_run_tail_lines=args.proxy_run_tail_lines,
             byte_tap=args.byte_tap,
@@ -3977,33 +5772,39 @@ def main() -> int:
                 ),
             }
 
-        profiles["local_c_tor_browser"] = run_c_tor(
-            tor_bin=tor_bin,
-            port=args.local_tor_port,
-            output_dir=output_dir / "local_c_tor_browser",
-            browser_bin=browser_bin,
-            targets=args.targets,
-            runs=args.runs,
-            timeout=args.timeout,
-            window_size=args.window_size,
-            warm_cache=args.warm_cache,
-            compact_output=args.compact_output,
-            post_boot_wait=args.post_boot_wait,
-            proxy_log_tail_lines=args.proxy_log_tail_lines,
-            byte_tap=args.byte_tap,
-            byte_tap_port_offset=args.byte_tap_port_offset,
-            byte_tap_event_limit=args.byte_tap_event_limit,
-            byte_tap_socks_reply_bind_port_tag=args.byte_tap_socks_reply_bind_port_tag,
-            browser_net_log=args.browser_net_log,
-            browser_serial_http_connections=args.browser_serial_http_connections,
-            browser_max_persistent_connections_per_server=(
-                args.browser_max_persistent_connections_per_server
-            ),
-            browser_block_url_substrings=browser_block_url_substrings,
-            browser_startup_seed_root=Path(args.browser_startup_seed_root).resolve(),
-            no_browser_startup_seed=args.no_browser_startup_seed,
-            source_tweaks=payload["source_tweaks"],
-        )
+        if args.skip_local_c_tor:
+            profiles["local_c_tor_browser"] = {
+                "skipped": True,
+                "reason": "disabled by --skip-local-c-tor",
+            }
+        else:
+            profiles["local_c_tor_browser"] = run_c_tor(
+                tor_bin=tor_bin,
+                port=args.local_tor_port,
+                output_dir=output_dir / "local_c_tor_browser",
+                browser_bin=browser_bin,
+                targets=args.targets,
+                runs=args.runs,
+                timeout=args.timeout,
+                window_size=args.window_size,
+                warm_cache=args.warm_cache,
+                compact_output=args.compact_output,
+                post_boot_wait=args.post_boot_wait,
+                proxy_log_tail_lines=args.proxy_log_tail_lines,
+                byte_tap=args.byte_tap,
+                byte_tap_port_offset=args.byte_tap_port_offset,
+                byte_tap_event_limit=args.byte_tap_event_limit,
+                byte_tap_socks_reply_bind_port_tag=args.byte_tap_socks_reply_bind_port_tag,
+                browser_net_log=args.browser_net_log,
+                browser_serial_http_connections=args.browser_serial_http_connections,
+                browser_max_persistent_connections_per_server=(
+                    args.browser_max_persistent_connections_per_server
+                ),
+                browser_block_url_substrings=browser_block_url_substrings,
+                browser_startup_seed_root=Path(args.browser_startup_seed_root).resolve(),
+                no_browser_startup_seed=args.no_browser_startup_seed,
+                source_tweaks=payload["source_tweaks"],
+            )
         for ux_index, conflux_ux in enumerate(args.extra_c_tor_conflux_ux):
             ux_port = args.local_tor_port + 120 + ux_index
             ux_name = f"local_c_tor_browser_confluxux_{conflux_ux}"
@@ -4037,99 +5838,156 @@ def main() -> int:
                 source_tweaks=payload["source_tweaks"],
                 conflux_client_ux=conflux_ux,
             )
-        profiles["arti_release_browser"] = run_arti(
-            arti_bin=arti_bin,
-            port=args.arti_port,
-            output_dir=output_dir / "arti_release_browser",
-            browser_bin=browser_bin,
-            targets=args.targets,
-            runs=args.runs,
-            timeout=args.timeout,
-            window_size=args.window_size,
-            warm_cache=args.warm_cache,
-            compact_output=args.compact_output,
-            post_boot_wait=args.post_boot_wait,
-            arti_log_level=args.arti_log_level,
-            arti_proxy_buffer_size=args.arti_proxy_buffer_size,
-            arti_stream_scheduler_burst=args.arti_stream_scheduler_burst,
-            arti_exit_select_parallelism=args.arti_exit_select_parallelism,
-            arti_exit_launch_parallelism=args.arti_exit_launch_parallelism,
-            arti_min_exit_circs_for_port=args.arti_min_exit_circs_for_port,
-            arti_socks_connect_soft_timeout_ms=(
-                args.arti_socks_connect_soft_timeout_ms
-            ),
-            arti_socks_connect_soft_timeout_attempts=(
-                args.arti_socks_connect_soft_timeout_attempts
-            ),
-            arti_socks_connect_hedge_ms=args.arti_socks_connect_hedge_ms,
-            arti_socks_relay_byte_timing=args.arti_socks_relay_byte_timing,
-            arti_socks_partial_relay_idle_timeout_ms=(
-                args.arti_socks_partial_relay_idle_timeout_ms
-            ),
-            arti_socks_no_tor_byte_relay_timeout_ms=(
-                args.arti_socks_no_tor_byte_relay_timeout_ms
-            ),
-            arti_dirclient_read_timeout_ms=args.arti_dirclient_read_timeout_ms,
-            arti_exit_pending_hedge_ms=args.arti_exit_pending_hedge_ms,
-            arti_exit_select_load_aware=args.arti_exit_select_load_aware,
-            arti_exit_select_health_aware=args.arti_exit_select_health_aware,
-            arti_exit_select_health_min_move_score_bps=(
-                args.arti_exit_select_health_min_move_score_bps
-            ),
-            arti_exit_select_avoid_bad_health=(
-                args.arti_exit_select_avoid_bad_health
-            ),
-            arti_exit_select_avoid_bad_health_unknown_fallback=(
-                args.arti_exit_select_avoid_bad_health_unknown_fallback
-            ),
-            arti_exit_select_bad_health_hedge_ms=(
-                args.arti_exit_select_bad_health_hedge_ms
-            ),
-            arti_exit_select_bad_health_stream_idle_ms=(
-                args.arti_exit_select_bad_health_stream_idle_ms
-            ),
-            arti_exit_select_bad_health_active_no_data_ms=(
-                args.arti_exit_select_bad_health_active_no_data_ms
-            ),
-            arti_exit_select_max_active_streams=(
-                args.arti_exit_select_max_active_streams
-            ),
-            arti_exit_select_max_assigned_streams=(
-                args.arti_exit_select_max_assigned_streams
-            ),
-            arti_exit_select_min_assignment_spread=(
-                args.arti_exit_select_min_assignment_spread
-            ),
-            arti_exit_select_healthy_over_cold_min_assigned=(
-                args.arti_exit_select_healthy_over_cold_min_assigned
-            ),
-            arti_exit_select_healthy_over_cold_guard_only_min_assigned=(
-                args.arti_exit_select_healthy_over_cold_guard_only_min_assigned
-            ),
-            arti_exit_same_isolation_target=args.arti_exit_same_isolation_target,
-            arti_exit_same_isolation_require_bad_health=(
-                args.arti_exit_same_isolation_require_bad_health
-            ),
-            arti_exit_same_isolation_min_assigned_streams=(
-                args.arti_exit_same_isolation_min_assigned_streams
-            ),
-            arti_exit_select_prefer_cold_same_isolation=(
-                args.arti_exit_select_prefer_cold_same_isolation
-            ),
-            proxy_log_tail_lines=args.proxy_log_tail_lines,
-            byte_tap=args.byte_tap,
-            byte_tap_port_offset=args.byte_tap_port_offset,
-            byte_tap_event_limit=args.byte_tap_event_limit,
-            byte_tap_socks_reply_bind_port_tag=args.byte_tap_socks_reply_bind_port_tag,
-            browser_net_log=args.browser_net_log,
-            browser_serial_http_connections=args.browser_serial_http_connections,
-            browser_max_persistent_connections_per_server=(
-                args.browser_max_persistent_connections_per_server
-            ),
-            browser_block_url_substrings=browser_block_url_substrings,
-            browser_startup_seed_root=Path(args.browser_startup_seed_root).resolve(),
-            no_browser_startup_seed=args.no_browser_startup_seed,
-        )
+        if args.skip_plain_arti:
+            profiles["arti_release_browser"] = {
+                "skipped": True,
+                "reason": "disabled by --skip-plain-arti",
+            }
+        else:
+            profiles["arti_release_browser"] = run_arti(
+                arti_bin=arti_bin,
+                port=args.arti_port,
+                output_dir=output_dir / "arti_release_browser",
+                browser_bin=browser_bin,
+                targets=args.targets,
+                runs=args.runs,
+                timeout=args.timeout,
+                window_size=args.window_size,
+                warm_cache=args.warm_cache,
+                compact_output=args.compact_output,
+                post_boot_wait=args.post_boot_wait,
+                arti_log_level=args.arti_log_level,
+                arti_proxy_buffer_size=args.arti_proxy_buffer_size,
+                arti_stream_scheduler_burst=args.arti_stream_scheduler_burst,
+                arti_exit_select_parallelism=args.arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=args.arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=(
+                    args.arti_hspool_launch_parallelism
+                ),
+                arti_hspool_background_start_delay_ms=(
+                    args.arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_background_start_on_demand=(
+                    args.arti_hspool_background_start_on_demand
+                ),
+                arti_hspool_guarded_stem_target=(
+                    args.arti_hspool_guarded_stem_target
+                ),
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    args.arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=(
+                    args.arti_hspool_on_demand_grace_ms
+                ),
+                arti_hspool_on_demand_race_ms=args.arti_hspool_on_demand_race_ms,
+                arti_hspool_background_build_timeout_cap_ms=(
+                    args.arti_hspool_background_build_timeout_cap_ms
+                ),
+                arti_hspool_client_hsdir_extend_timeout_cap_ms=(
+                    args.arti_hspool_client_hsdir_extend_timeout_cap_ms
+                ),
+                arti_hspool_client_hsdir_extend_timeout_cap_startup_only=(
+                    args.arti_hspool_client_hsdir_extend_timeout_cap_startup_only
+                ),
+                arti_min_exit_circs_for_port=args.arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=(
+                    args.arti_socks_connect_soft_timeout_ms
+                ),
+                arti_socks_connect_soft_timeout_attempts=(
+                    args.arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_socks_connect_hedge_ms=args.arti_socks_connect_hedge_ms,
+                arti_socks_relay_byte_timing=args.arti_socks_relay_byte_timing,
+                arti_socks_partial_relay_idle_timeout_ms=(
+                    args.arti_socks_partial_relay_idle_timeout_ms
+                ),
+                arti_socks_no_tor_byte_relay_timeout_ms=(
+                    args.arti_socks_no_tor_byte_relay_timeout_ms
+                ),
+                arti_dirclient_read_timeout_ms=args.arti_dirclient_read_timeout_ms,
+                arti_exit_pending_hedge_ms=args.arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=args.arti_exit_select_load_aware,
+                arti_exit_select_health_aware=args.arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    args.arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    args.arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_avoid_bad_health_unknown_fallback=(
+                    args.arti_exit_select_avoid_bad_health_unknown_fallback
+                ),
+                arti_exit_select_bad_health_hedge_ms=(
+                    args.arti_exit_select_bad_health_hedge_ms
+                ),
+                arti_exit_select_bad_health_stream_idle_ms=(
+                    args.arti_exit_select_bad_health_stream_idle_ms
+                ),
+                arti_exit_select_bad_health_active_no_data_ms=(
+                    args.arti_exit_select_bad_health_active_no_data_ms
+                ),
+                arti_exit_select_max_active_streams=(
+                    args.arti_exit_select_max_active_streams
+                ),
+                arti_exit_select_max_assigned_streams=(
+                    args.arti_exit_select_max_assigned_streams
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    args.arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_select_healthy_over_cold_min_assigned=(
+                    args.arti_exit_select_healthy_over_cold_min_assigned
+                ),
+                arti_exit_select_healthy_over_cold_guard_only_min_assigned=(
+                    args.arti_exit_select_healthy_over_cold_guard_only_min_assigned
+                ),
+                arti_exit_same_isolation_target=args.arti_exit_same_isolation_target,
+                arti_exit_same_isolation_require_bad_health=(
+                    args.arti_exit_same_isolation_require_bad_health
+                ),
+                arti_exit_same_isolation_min_assigned_streams=(
+                    args.arti_exit_same_isolation_min_assigned_streams
+                ),
+                arti_exit_select_prefer_cold_same_isolation=(
+                    args.arti_exit_select_prefer_cold_same_isolation
+                ),
+                arti_hs_intro_rend_overlap=args.arti_hs_intro_rend_overlap,
+                arti_hs_rend_prebuild_before_desc=(
+                    args.arti_hs_rend_prebuild_before_desc
+                ),
+                arti_hs_rend_prebuild_before_desc_shared_hit_only=(
+                    args.arti_hs_rend_prebuild_before_desc_shared_hit_only
+                ),
+                arti_hs_state_reuse_max_active_streams=(
+                    args.arti_hs_state_reuse_max_active_streams
+                ),
+                arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms=(
+                    args.arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms
+                ),
+                arti_hs_desc_shared_cache=args.arti_hs_desc_shared_cache,
+                arti_hs_intro_circuit_hedge_ms=(
+                    args.arti_hs_intro_circuit_hedge_ms
+                ),
+                proxy_log_tail_lines=args.proxy_log_tail_lines,
+                byte_tap=args.byte_tap,
+                byte_tap_port_offset=args.byte_tap_port_offset,
+                byte_tap_event_limit=args.byte_tap_event_limit,
+                byte_tap_socks_reply_bind_port_tag=(
+                    args.byte_tap_socks_reply_bind_port_tag
+                ),
+                browser_net_log=args.browser_net_log,
+                browser_serial_http_connections=(
+                    args.browser_serial_http_connections
+                ),
+                browser_max_persistent_connections_per_server=(
+                    args.browser_max_persistent_connections_per_server
+                ),
+                browser_block_url_substrings=browser_block_url_substrings,
+                browser_startup_seed_root=Path(
+                    args.browser_startup_seed_root
+                ).resolve(),
+                no_browser_startup_seed=args.no_browser_startup_seed,
+            )
     payload["profiles"] = profiles
 
     output_path = output_dir / "browser-compare.json"
@@ -4180,6 +6038,286 @@ def parse_soft_timeout_combos(values: list[str]) -> list[tuple[int, int]]:
                 "--extra-arti-socks-connect-soft-timeout-combo must use integer MS:ATTEMPTS"
             ) from exc
         combos.append((timeout_ms, attempts))
+    return combos
+
+
+def parse_hs_desc_shared_cache_hspool_race_background_start_delay_combos(
+    values: list[str],
+) -> list[tuple[int, int]]:
+    combos: list[tuple[int, int]] = []
+    for value in values:
+        parts = value.split(":", 1)
+        if len(parts) != 2:
+            raise ValueError(
+                "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-delay-combo must use RACE_MS:START_DELAY_MS"
+            )
+        try:
+            race_ms = int(parts[0])
+            delay_ms = int(parts[1])
+        except ValueError as exc:
+            raise ValueError(
+                "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-delay-combo must use integer RACE_MS:START_DELAY_MS"
+            ) from exc
+        combos.append((race_ms, delay_ms))
+    return combos
+
+
+def parse_hs_desc_shared_cache_hspool_race_background_start_on_demand_timeout_cap_combos(
+    values: list[str], *, option: str
+) -> list[tuple[int, int]]:
+    combos: list[tuple[int, int]] = []
+    for value in values:
+        parts = value.split(":", 1)
+        if len(parts) != 2:
+            raise ValueError(f"{option} must use RACE_MS:TIMEOUT_CAP_MS")
+        try:
+            race_ms = int(parts[0])
+            timeout_cap_ms = int(parts[1])
+        except ValueError as exc:
+            raise ValueError(
+                f"{option} must use integer RACE_MS:TIMEOUT_CAP_MS"
+            ) from exc
+        combos.append((race_ms, timeout_cap_ms))
+    return combos
+
+
+def parse_hs_shared_hit_only_reuse_hsdir_extend_timeout_cap_combos(
+    values: list[str],
+    *,
+    option: str = (
+        "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only-"
+        "reuse-max-active-streams-startup-only-hsdir-extend-timeout-cap-combo"
+    ),
+) -> list[tuple[int, int]]:
+    combos: list[tuple[int, int]] = []
+    for value in values:
+        parts = value.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"{option} must use MAX_ACTIVE_STREAMS:TIMEOUT_CAP_MS")
+        try:
+            max_active_streams, timeout_cap_ms = (int(part) for part in parts)
+        except ValueError as exc:
+            raise ValueError(
+                f"{option} must use integer MAX_ACTIVE_STREAMS:TIMEOUT_CAP_MS"
+            ) from exc
+        combos.append((max_active_streams, timeout_cap_ms))
+    return combos
+
+
+def parse_hs_shared_hit_only_reuse_cold_late_combos(
+    values: list[str],
+    *,
+    option: str = (
+        "--extra-arti-hs-rend-prebuild-before-desc-shared-cache-shared-hit-only-"
+        "reuse-max-active-streams-cold-late-combo"
+    ),
+) -> list[tuple[int, int]]:
+    combos: list[tuple[int, int]] = []
+    for value in values:
+        parts = value.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"{option} must use MAX_ACTIVE_STREAMS:TIMEOUT_MS")
+        try:
+            max_active_streams, timeout_ms = (int(part) for part in parts)
+        except ValueError as exc:
+            raise ValueError(
+                f"{option} must use integer MAX_ACTIVE_STREAMS:TIMEOUT_MS"
+            ) from exc
+        combos.append((max_active_streams, timeout_ms))
+    return combos
+
+
+def parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos(
+    values: list[str],
+    *,
+    option: str = (
+        "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-"
+        "min-hop-combo"
+    ),
+) -> list[tuple[int, int]]:
+    combos: list[tuple[int, int]] = []
+    for value in values:
+        parts = value.split(":")
+        if len(parts) != 2:
+            raise ValueError(f"{option} must use COALESCE_BYTES:MIN_HOP")
+        try:
+            coalesce_bytes, min_hop = (int(part) for part in parts)
+        except ValueError as exc:
+            raise ValueError(
+                f"{option} must use integer COALESCE_BYTES:MIN_HOP"
+            ) from exc
+        combos.append((coalesce_bytes, min_hop))
+    return combos
+
+
+def parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos(
+    values: list[str],
+    *,
+    option: str = (
+        "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-"
+        "min-hop-start-backlog-combo"
+    ),
+) -> list[tuple[int, int, int]]:
+    combos: list[tuple[int, int, int]] = []
+    for value in values:
+        parts = value.split(":")
+        if len(parts) != 3:
+            raise ValueError(
+                f"{option} must use COALESCE_BYTES:MIN_HOP:START_BACKLOG_BYTES"
+            )
+        try:
+            coalesce_bytes, min_hop, start_backlog_bytes = (
+                int(part) for part in parts
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"{option} must use integer COALESCE_BYTES:MIN_HOP:START_BACKLOG_BYTES"
+            ) from exc
+        combos.append((coalesce_bytes, min_hop, start_backlog_bytes))
+    return combos
+
+
+def parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos(
+    values: list[str],
+    *,
+    option: str = (
+        "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-"
+        "min-hop-busy-max-combo"
+    ),
+) -> list[tuple[int, int, int]]:
+    combos: list[tuple[int, int, int]] = []
+    for value in values:
+        parts = value.split(":")
+        if len(parts) != 3:
+            raise ValueError(
+                f"{option} must use COALESCE_BYTES:MIN_HOP:BUSY_MAX_BYTES"
+            )
+        try:
+            coalesce_bytes, min_hop, busy_max_bytes = (int(part) for part in parts)
+        except ValueError as exc:
+            raise ValueError(
+                f"{option} must use integer COALESCE_BYTES:MIN_HOP:BUSY_MAX_BYTES"
+            ) from exc
+        combos.append((coalesce_bytes, min_hop, busy_max_bytes))
+    return combos
+
+
+def parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos(
+    values: list[str],
+    *,
+    option: str = (
+        "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-"
+        "min-hop-rendezvous-establish-timeout-floor-combo"
+    ),
+) -> list[tuple[int, int, int]]:
+    combos: list[tuple[int, int, int]] = []
+    for value in values:
+        parts = value.split(":")
+        if len(parts) != 3:
+            raise ValueError(
+                f"{option} must use COALESCE_BYTES:MIN_HOP:TIMEOUT_FLOOR_MS"
+            )
+        try:
+            coalesce_bytes, min_hop, timeout_floor_ms = (
+                int(part) for part in parts
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"{option} must use integer COALESCE_BYTES:MIN_HOP:TIMEOUT_FLOOR_MS"
+            ) from exc
+        combos.append((coalesce_bytes, min_hop, timeout_floor_ms))
+    return combos
+
+
+def parse_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge_combos(
+    values: list[str],
+) -> list[tuple[int, int]]:
+    combos: list[tuple[int, int]] = []
+    for value in values:
+        parts = value.split(":", 1)
+        if len(parts) != 2:
+            raise ValueError(
+                "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-intro-circuit-hedge-combo must use RACE_MS:HEDGE_MS"
+            )
+        try:
+            race_ms = int(parts[0])
+            hedge_ms = int(parts[1])
+        except ValueError as exc:
+            raise ValueError(
+                "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-intro-circuit-hedge-combo must use integer RACE_MS:HEDGE_MS"
+            ) from exc
+        combos.append((race_ms, hedge_ms))
+    return combos
+
+
+def parse_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism_combos(
+    values: list[str],
+) -> list[tuple[int, int, int]]:
+    combos: list[tuple[int, int, int]] = []
+    for value in values:
+        parts = value.split(":")
+        if len(parts) != 3:
+            raise ValueError(
+                "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-delay-launch-parallelism-combo must use RACE_MS:START_DELAY_MS:LAUNCH_PARALLELISM"
+            )
+        try:
+            race_ms = int(parts[0])
+            delay_ms = int(parts[1])
+            launch_parallelism = int(parts[2])
+        except ValueError as exc:
+            raise ValueError(
+                "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-delay-launch-parallelism-combo must use integer RACE_MS:START_DELAY_MS:LAUNCH_PARALLELISM"
+            ) from exc
+        combos.append((race_ms, delay_ms, launch_parallelism))
+    return combos
+
+
+def parse_hs_desc_shared_cache_hspool_race_background_start_delay_guarded_stem_target_defer_post_boot_combos(
+    values: list[str],
+) -> list[tuple[int, int, int]]:
+    combos: list[tuple[int, int, int]] = []
+    for value in values:
+        parts = value.split(":")
+        if len(parts) != 3:
+            raise ValueError(
+                "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-delay-guarded-stem-target-defer-post-bootstrap-combo must use RACE_MS:START_DELAY_MS:GUARDED_STEM_TARGET"
+            )
+        try:
+            race_ms = int(parts[0])
+            delay_ms = int(parts[1])
+            guarded_stem_target = int(parts[2])
+        except ValueError as exc:
+            raise ValueError(
+                "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-delay-guarded-stem-target-defer-post-bootstrap-combo must use integer RACE_MS:START_DELAY_MS:GUARDED_STEM_TARGET"
+            ) from exc
+        combos.append((race_ms, delay_ms, guarded_stem_target))
+    return combos
+
+
+def parse_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_boot_combos(
+    values: list[str],
+    *,
+    option: str = (
+        "--extra-arti-hs-desc-shared-cache-hspool-race-background-start-on-demand-"
+        "hsdir-extend-timeout-cap-guarded-stem-target-defer-post-bootstrap-combo"
+    ),
+) -> list[tuple[int, int, int]]:
+    combos: list[tuple[int, int, int]] = []
+    for value in values:
+        parts = value.split(":")
+        if len(parts) != 3:
+            raise ValueError(
+                f"{option} must use RACE_MS:TIMEOUT_CAP_MS:GUARDED_STEM_TARGET"
+            )
+        try:
+            race_ms, timeout_cap_ms, guarded_stem_target = (
+                int(part) for part in parts
+            )
+        except ValueError as exc:
+            raise ValueError(
+                f"{option} must use integer RACE_MS:TIMEOUT_CAP_MS:GUARDED_STEM_TARGET"
+            ) from exc
+        combos.append((race_ms, timeout_cap_ms, guarded_stem_target))
     return combos
 
 
@@ -4511,6 +6649,12 @@ def detect_source_tweaks(arti_root: Path) -> dict[str, object]:
         r"TORFAST_HSPOOL_BACKGROUND_START_DELAY_DEFAULT_MS:\s*u64\s*=\s*([0-9_]+)",
         circmgr_hspool_text,
     )
+    hspool_background_build_timeout_cap_lab = (
+        "TORFAST_HSPOOL_BACKGROUND_BUILD_TIMEOUT_CAP_MS" in circmgr_hspool_text
+    )
+    hspool_client_hsdir_extend_timeout_cap_lab = (
+        "TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_MS" in circmgr_hspool_text
+    )
     hspool_on_demand_grace_default = re.search(
         r"TORFAST_HSPOOL_ON_DEMAND_POOL_GRACE_DEFAULT_MS:\s*u64\s*=\s*(\d+)",
         circmgr_hspool_text,
@@ -4589,6 +6733,23 @@ def detect_source_tweaks(arti_root: Path) -> dict[str, object]:
             if hspool_background_start_delay_default
             else None
         ),
+        "arti_hspool_background_start_on_demand_lab": (
+            "TORFAST_HSPOOL_BACKGROUND_START_ON_DEMAND" in circmgr_hspool_text
+        ),
+        "arti_hspool_background_build_timeout_cap_lab": (
+            hspool_background_build_timeout_cap_lab
+        ),
+        "arti_hspool_client_hsdir_extend_timeout_cap_lab": (
+            hspool_client_hsdir_extend_timeout_cap_lab
+        ),
+        "arti_hspool_client_hsdir_extend_timeout_cap_startup_only_lab": (
+            "TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_STARTUP_ONLY"
+            in circmgr_hspool_pool_text
+        ),
+        "arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only_lab": (
+            "TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_POST_BOOT_ONLY"
+            in circmgr_hspool_pool_text
+        ),
         "arti_hspool_on_demand_grace_lab": (
             "TORFAST_HSPOOL_ON_DEMAND_POOL_GRACE_MS" in circmgr_hspool_text
         ),
@@ -4613,17 +6774,33 @@ def detect_source_tweaks(arti_root: Path) -> dict[str, object]:
             if hspool_guarded_stem_target_default
             else None
         ),
+        "arti_hspool_guarded_stem_target_defer_post_boot_lab": (
+            "TORFAST_HSPOOL_GUARDED_STEM_TARGET_DEFER_POST_BOOT"
+            in circmgr_hspool_pool_text
+        ),
         "arti_hs_intro_rend_overlap_lab": (
             "TORFAST_HS_INTRO_REND_OVERLAP" in hsclient_connect_text
         ),
         "arti_hs_rend_prebuild_before_desc_lab": (
             "TORFAST_HS_REND_PREBUILD_BEFORE_DESC" in hsclient_connect_text
         ),
+        "arti_hs_rend_prebuild_before_desc_shared_hit_only_lab": (
+            "TORFAST_HS_REND_PREBUILD_BEFORE_DESC_SHARED_HIT_ONLY"
+            in hsclient_connect_text
+        ),
+        "arti_hs_rend_prebuild_cold_after_desc_stream_ready_lab": (
+            "TORFAST_HS_REND_PREBUILD_COLD_AFTER_DESC_STREAM_READY_MS"
+            in hsclient_connect_text
+        ),
         "arti_hs_desc_shared_cache_lab": (
             "TORFAST_HS_DESC_SHARED_CACHE" in hsclient_connect_text
         ),
         "arti_hs_intro_circuit_hedge_lab": (
             "TORFAST_HS_INTRO_CIRCUIT_HEDGE_MS" in hsclient_connect_text
+        ),
+        "arti_hs_rendezvous_establish_timeout_floor_lab": (
+            "TORFAST_HS_RENDEZVOUS_ESTABLISH_TIMEOUT_FLOOR_MS"
+            in hsclient_connect_text
         ),
         "arti_socks_connect_soft_timeout_lab": (
             "TORFAST_SOCKS_CONNECT_SOFT_TIMEOUT_MS" in socks_text
@@ -4639,6 +6816,9 @@ def detect_source_tweaks(arti_root: Path) -> dict[str, object]:
         ),
         "arti_stream_ready_data_coalesce_lab": (
             "TORFAST_STREAM_READY_DATA_COALESCE_BYTES" in data_stream_text
+        ),
+        "arti_stream_ready_data_coalesce_busy_max_lab": (
+            "TORFAST_STREAM_READY_DATA_COALESCE_BUSY_MAX_BYTES" in data_stream_text
         ),
         "arti_proxy_app_stream_buffer_lab": (
             "TORFAST_APP_STREAM_BUF_LEN" in proxy_text
@@ -4839,10 +7019,15 @@ class ProxySpec:
     arti_exit_launch_parallelism: int | None = None
     arti_hspool_launch_parallelism: int | None = None
     arti_hspool_background_start_delay_ms: int | None = None
+    arti_hspool_background_start_on_demand: bool = False
     arti_hspool_guarded_stem_target: int | None = None
     arti_hspool_guarded_stem_target_defer_post_boot: bool = False
     arti_hspool_on_demand_grace_ms: int | None = None
     arti_hspool_on_demand_race_ms: int | None = None
+    arti_hspool_background_build_timeout_cap_ms: int | None = None
+    arti_hspool_client_hsdir_extend_timeout_cap_ms: int | None = None
+    arti_hspool_client_hsdir_extend_timeout_cap_startup_only: bool = False
+    arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only: bool = False
     arti_min_exit_circs_for_port: int | None = None
     arti_preemptive_443_circs: int | None = None
     arti_preemptive_443_burst_min_requests: int | None = None
@@ -4853,6 +7038,9 @@ class ProxySpec:
     arti_socks_relay_byte_timing: bool = False
     arti_socks_tor_to_client_coalesce_bytes: int | None = None
     arti_stream_ready_data_coalesce_bytes: int | None = None
+    arti_stream_ready_data_coalesce_min_hop: int | None = None
+    arti_stream_ready_data_coalesce_start_backlog_bytes: int | None = None
+    arti_stream_ready_data_coalesce_busy_max_bytes: int | None = None
     arti_stream_scheduler_burst: int | None = None
     arti_socks_partial_relay_idle_timeout_ms: int | None = None
     arti_socks_no_tor_byte_relay_timeout_ms: int | None = None
@@ -4897,8 +7085,12 @@ class ProxySpec:
     arti_exit_select_prefer_cold_same_isolation: bool = False
     arti_hs_intro_rend_overlap: bool = False
     arti_hs_rend_prebuild_before_desc: bool = False
+    arti_hs_rend_prebuild_before_desc_shared_hit_only: bool = False
+    arti_hs_state_reuse_max_active_streams: int | None = None
+    arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms: int | None = None
     arti_hs_desc_shared_cache: bool = False
     arti_hs_intro_circuit_hedge_ms: int | None = None
+    arti_hs_rendezvous_establish_timeout_floor_ms: int | None = None
 
 
 def effective_arti_log_level(
@@ -4906,11 +7098,17 @@ def effective_arti_log_level(
     socks_relay_byte_timing: bool,
     hspool_launch_parallelism: int | None = None,
     hspool_background_start_delay_ms: int | None = None,
+    hspool_background_start_on_demand: bool = False,
     hspool_guarded_stem_target: int | None = None,
     hspool_on_demand_grace_ms: int | None = None,
     hspool_on_demand_race_ms: int | None = None,
+    hspool_background_build_timeout_cap_ms: int | None = None,
+    hspool_client_hsdir_extend_timeout_cap_ms: int | None = None,
     hs_intro_rend_overlap: bool = False,
     hs_rend_prebuild_before_desc: bool = False,
+    hs_rend_prebuild_before_desc_shared_hit_only: bool = False,
+    hs_state_reuse_max_active_streams: int | None = None,
+    hs_rend_prebuild_cold_after_desc_stream_ready_ms: int | None = None,
     hs_desc_shared_cache: bool = False,
     hs_intro_circuit_hedge_ms: int | None = None,
 ) -> str:
@@ -4930,6 +7128,8 @@ def effective_arti_log_level(
         and "tor_circmgr=debug" not in parts
     ):
         parts.append("tor_circmgr=debug")
+    if hspool_background_start_on_demand and "tor_circmgr=debug" not in parts:
+        parts.append("tor_circmgr=debug")
     if (
         hspool_guarded_stem_target is not None
         and hspool_guarded_stem_target > 2
@@ -4943,8 +7143,10 @@ def effective_arti_log_level(
     ):
         parts.append("tor_circmgr=debug")
     if (
-        hspool_on_demand_race_ms is not None
-        and hspool_on_demand_race_ms > 0
+        (
+            hspool_background_build_timeout_cap_ms is not None
+            or hspool_client_hsdir_extend_timeout_cap_ms is not None
+        )
         and "tor_circmgr=debug" not in parts
     ):
         parts.append("tor_circmgr=debug")
@@ -4953,6 +7155,8 @@ def effective_arti_log_level(
             socks_relay_byte_timing
             or hs_intro_rend_overlap
             or hs_rend_prebuild_before_desc
+            or hs_rend_prebuild_before_desc_shared_hit_only
+            or hs_rend_prebuild_cold_after_desc_stream_ready_ms is not None
             or hs_desc_shared_cache
             or hs_intro_circuit_hedge_ms is not None
         )
@@ -5576,6 +7780,7 @@ def run_interleaved_profiles(
     arti_hspool_launch_parallelism: int | None = None,
     arti_hspool_background_start_delay_ms: int | None = None,
     arti_hspool_guarded_stem_target: int | None = None,
+    arti_hspool_guarded_stem_target_defer_post_boot: bool = False,
     arti_hspool_on_demand_grace_ms: int | None = None,
     arti_hspool_on_demand_race_ms: int | None = None,
     arti_min_exit_circs_for_port: int | None = None,
@@ -5622,7 +7827,106 @@ def run_interleaved_profiles(
     extra_arti_hs_intro_rend_overlap: bool = False,
     extra_arti_hs_rend_prebuild_before_desc: bool = False,
     extra_arti_hs_desc_shared_cache: bool = False,
+    extra_arti_hs_desc_shared_cache_stream_scheduler_burst: list[int] | None = None,
+    extra_arti_hs_desc_shared_cache_socks_tor_to_client_coalesce_bytes: list[int]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_bytes: list[int]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_reuse_max_active_streams: list[int] | None = None,
+    extra_arti_hs_desc_shared_cache_rendezvous_establish_timeout_floor_ms: list[int]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos: list[
+        tuple[int, int]
+    ]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos: list[
+        tuple[int, int, int]
+    ]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos: list[
+        tuple[int, int, int]
+    ]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos: list[
+        tuple[int, int, int]
+    ]
+    | None = None,
+    extra_arti_hs_rend_prebuild_before_desc_shared_cache: bool = False,
+    extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only: bool = False,
+    extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_stream_ready_data_coalesce_bytes: list[
+        int
+    ]
+    | None = None,
+    extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams: list[
+        int
+    ]
+    | None = None,
+    extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_cold_late_combos: list[
+        tuple[int, int]
+    ]
+    | None = None,
+    extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_startup_only_hsdir_extend_timeout_cap_combos: list[
+        tuple[int, int]
+    ]
+    | None = None,
+    extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_guarded_stem_target: list[
+        int
+    ]
+    | None = None,
+    extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_cold_late_ms: list[
+        int
+    ]
+    | None = None,
     extra_arti_hs_intro_circuit_hedge_ms: list[int] | None = None,
+    extra_arti_hs_desc_shared_cache_intro_circuit_hedge_ms: list[int] | None = None,
+    extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_ms: list[int]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_startup_only_ms: list[
+        int
+    ]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_post_boot_only_ms: list[
+        int
+    ]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand: bool = False,
+    extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand_hsdir_extend_timeout_cap_startup_only_ms: list[
+        int
+    ]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_hspool_on_demand_race_ms: list[int] | None = None,
+    extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_ms: list[
+        int
+    ]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_background_build_timeout_cap_combos: list[
+        tuple[int, int]
+    ]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_combos: list[
+        tuple[int, int]
+    ]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_boot_combos: list[
+        tuple[int, int, int]
+    ]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge_combos: list[
+        tuple[int, int]
+    ]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_combos: list[
+        tuple[int, int]
+    ]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism_combos: list[
+        tuple[int, int, int]
+    ]
+    | None = None,
+    extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_guarded_stem_target_defer_post_boot_combos: list[
+        tuple[int, int, int]
+    ]
+    | None = None,
     extra_arti_min_exit_circs_for_port: list[int] | None = None,
     extra_arti_preemptive_443_circs: list[int] | None = None,
     extra_arti_preemptive_443_burst_min_requests: list[int] | None = None,
@@ -5676,6 +7980,10 @@ def run_interleaved_profiles(
     ]
     | None = None,
     extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_partial_retry_chunking_hs_rend_prebuild_before_desc: bool = False,
+    extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_partial_retry_chunking_bad_health_replacement_gate_combos: list[
+        tuple[int, int, int]
+    ]
+    | None = None,
     extra_arti_dir_microdesc_source_spread_pending_spread: bool = False,
     extra_arti_dir_microdesc_retry_ids_per_request: list[int] | None = None,
     extra_arti_exit_select_load_aware: bool = False,
@@ -5703,6 +8011,10 @@ def run_interleaved_profiles(
     ]
     | None = None,
     extra_arti_exit_select_prefer_cold_same_isolation_prewarm_target: list[int]
+    | None = None,
+    extra_arti_exit_select_health_aware_same_isolation_prefer_cold_prewarm_target: list[
+        int
+    ]
     | None = None,
     extra_arti_exit_select_health_aware_same_isolation_prefer_cold_prewarm_pending_wait: list[
         tuple[int, int]
@@ -5757,6 +8069,8 @@ def run_interleaved_profiles(
     extra_arti_bins: list[tuple[str, Path]] | None = None,
     extra_arti_port_start: int = 19083,
     include_bundled_tor: bool = True,
+    include_local_c_tor: bool = True,
+    include_plain_arti: bool = True,
     proxy_log_tail_lines: int = 200,
     proxy_run_tail_lines: int = 0,
     byte_tap: bool = False,
@@ -5774,6 +8088,12 @@ def run_interleaved_profiles(
 ) -> dict[str, object]:
     profiles: dict[str, object] = {}
     specs: list[ProxySpec] = []
+    base_hspool_guarded_kwargs = {
+        "arti_hspool_guarded_stem_target": arti_hspool_guarded_stem_target,
+        "arti_hspool_guarded_stem_target_defer_post_boot": (
+            arti_hspool_guarded_stem_target_defer_post_boot
+        ),
+    }
     if include_bundled_tor and bundled_tor_bin.exists():
         specs.append(
             ProxySpec(
@@ -5793,15 +8113,23 @@ def run_interleaved_profiles(
                 else f"bundled tor not found: {bundled_tor_bin}"
             ),
         }
-    specs.extend(
-        [
+    if include_local_c_tor:
+        specs.append(
             ProxySpec(
                 name="local_c_tor_browser",
                 kind="c_tor",
                 bin_path=tor_bin,
                 port=ports["local_c_tor_browser"],
                 output_dir=output_dir / "local_c_tor_browser",
-            ),
+            )
+        )
+    else:
+        profiles["local_c_tor_browser"] = {
+            "skipped": True,
+            "reason": "disabled by --skip-local-c-tor",
+        }
+    if include_plain_arti:
+        specs.append(
             ProxySpec(
                 name="arti_release_browser",
                 kind="arti",
@@ -5813,8 +8141,13 @@ def run_interleaved_profiles(
                 arti_proxy_app_buffer_len=arti_proxy_app_buffer_len,
                 arti_stream_scheduler_burst=arti_stream_scheduler_burst,
                 arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
                 arti_hspool_background_start_delay_ms=(
                     arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
                 ),
                 arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
                 arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
@@ -5855,9 +8188,13 @@ def run_interleaved_profiles(
                 arti_exit_select_prefer_cold_same_isolation=(
                     arti_exit_select_prefer_cold_same_isolation
                 ),
-            ),
-        ]
-    )
+            )
+        )
+    else:
+        profiles["arti_release_browser"] = {
+            "skipped": True,
+            "reason": "disabled by --skip-plain-arti",
+        }
     next_extra_port = extra_arti_port_start
     for profile_name, extra_bin in extra_arti_bins or []:
         specs.append(
@@ -5870,6 +8207,16 @@ def run_interleaved_profiles(
                 log_level=arti_log_level,
                 arti_proxy_buffer_size=arti_proxy_buffer_size,
                 arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
                 arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
                 arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
                 arti_socks_connect_soft_timeout_attempts=(
@@ -5912,6 +8259,16 @@ def run_interleaved_profiles(
                 log_level=arti_log_level,
                 arti_proxy_buffer_size=arti_proxy_buffer_size,
                 arti_exit_select_parallelism=parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
                 arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
                 arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
                 arti_socks_connect_soft_timeout_attempts=arti_socks_connect_soft_timeout_attempts,
@@ -5947,6 +8304,10 @@ def run_interleaved_profiles(
                 arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
                 arti_hspool_background_start_delay_ms=(
                     arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
                 ),
                 arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
                 arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
@@ -5986,6 +8347,7 @@ def run_interleaved_profiles(
                 arti_hspool_background_start_delay_ms=(
                     arti_hspool_background_start_delay_ms
                 ),
+                **base_hspool_guarded_kwargs,
                 arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
                 arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
                 arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
@@ -6024,6 +8386,7 @@ def run_interleaved_profiles(
                 arti_exit_launch_parallelism=arti_exit_launch_parallelism,
                 arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
                 arti_hspool_background_start_delay_ms=delay_ms,
+                **base_hspool_guarded_kwargs,
                 arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
                 arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
                 arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
@@ -6155,6 +8518,7 @@ def run_interleaved_profiles(
                 arti_hspool_background_start_delay_ms=(
                     arti_hspool_background_start_delay_ms
                 ),
+                **base_hspool_guarded_kwargs,
                 arti_hspool_on_demand_grace_ms=grace_ms,
                 arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
                 arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
@@ -6195,6 +8559,7 @@ def run_interleaved_profiles(
                 arti_hspool_background_start_delay_ms=(
                     arti_hspool_background_start_delay_ms
                 ),
+                **base_hspool_guarded_kwargs,
                 arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
                 arti_hspool_on_demand_race_ms=race_ms,
                 arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
@@ -6235,6 +8600,7 @@ def run_interleaved_profiles(
                 arti_hspool_background_start_delay_ms=(
                     arti_hspool_background_start_delay_ms
                 ),
+                **base_hspool_guarded_kwargs,
                 arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
                 arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
                 arti_hs_intro_rend_overlap=True,
@@ -6276,6 +8642,7 @@ def run_interleaved_profiles(
                 arti_hspool_background_start_delay_ms=(
                     arti_hspool_background_start_delay_ms
                 ),
+                **base_hspool_guarded_kwargs,
                 arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
                 arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
                 arti_hs_rend_prebuild_before_desc=True,
@@ -6317,8 +8684,570 @@ def run_interleaved_profiles(
                 arti_hspool_background_start_delay_ms=(
                     arti_hspool_background_start_delay_ms
                 ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
                 arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
                 arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, burst in enumerate(
+        extra_arti_hs_desc_shared_cache_stream_scheduler_burst or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_stream_scheduler_burst_profile_name(
+                burst, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_stream_scheduler_burst=burst,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, coalesce_bytes in enumerate(
+        extra_arti_hs_desc_shared_cache_socks_tor_to_client_coalesce_bytes or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_socks_tor_to_client_coalesce_profile_name(
+                coalesce_bytes, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_hs_desc_shared_cache=True,
+                arti_socks_tor_to_client_coalesce_bytes=coalesce_bytes,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, coalesce_bytes in enumerate(
+        extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_bytes or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_profile_name(
+                coalesce_bytes,
+                index,
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_stream_ready_data_coalesce_bytes=coalesce_bytes,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, max_active_streams in enumerate(
+        extra_arti_hs_desc_shared_cache_reuse_max_active_streams or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_reuse_max_active_streams_profile_name(
+                max_active_streams,
+                index,
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_state_reuse_max_active_streams=max_active_streams,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, timeout_floor_ms in enumerate(
+        extra_arti_hs_desc_shared_cache_rendezvous_establish_timeout_floor_ms or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_rendezvous_establish_timeout_floor_profile_name(
+                timeout_floor_ms,
+                index,
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_hs_rendezvous_establish_timeout_floor_ms=timeout_floor_ms,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, (
+        coalesce_bytes,
+        min_hop,
+    ) in enumerate(
+        extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_profile_name(
+                coalesce_bytes,
+                min_hop,
+                index,
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_stream_ready_data_coalesce_bytes=coalesce_bytes,
+                arti_stream_ready_data_coalesce_min_hop=min_hop,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, (
+        coalesce_bytes,
+        min_hop,
+        busy_max_bytes,
+    ) in enumerate(
+        extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_combos
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_profile_name(
+                coalesce_bytes,
+                min_hop,
+                busy_max_bytes,
+                index,
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_stream_ready_data_coalesce_bytes=coalesce_bytes,
+                arti_stream_ready_data_coalesce_min_hop=min_hop,
+                arti_stream_ready_data_coalesce_busy_max_bytes=busy_max_bytes,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, (
+        coalesce_bytes,
+        min_hop,
+        timeout_floor_ms,
+    ) in enumerate(
+        extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_combos
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_profile_name(
+                coalesce_bytes,
+                min_hop,
+                timeout_floor_ms,
+                index,
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_stream_ready_data_coalesce_bytes=coalesce_bytes,
+                arti_stream_ready_data_coalesce_min_hop=min_hop,
+                arti_hs_rendezvous_establish_timeout_floor_ms=timeout_floor_ms,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, (
+        coalesce_bytes,
+        min_hop,
+        start_backlog_bytes,
+    ) in enumerate(
+        extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_combos
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_profile_name(
+                coalesce_bytes,
+                min_hop,
+                start_backlog_bytes,
+                index,
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_stream_ready_data_coalesce_bytes=coalesce_bytes,
+                arti_stream_ready_data_coalesce_min_hop=min_hop,
+                arti_stream_ready_data_coalesce_start_backlog_bytes=(
+                    start_backlog_bytes
+                ),
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    if extra_arti_hs_rend_prebuild_before_desc_shared_cache:
+        profile_name = (
+            extra_arti_hs_rend_prebuild_before_desc_shared_cache_profile_name()
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_rend_prebuild_before_desc=True,
                 arti_hs_desc_shared_cache=True,
                 arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
                 arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
@@ -6360,9 +9289,1139 @@ def run_interleaved_profiles(
                 arti_hspool_background_start_delay_ms=(
                     arti_hspool_background_start_delay_ms
                 ),
+                **base_hspool_guarded_kwargs,
                 arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
                 arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
                 arti_hs_intro_circuit_hedge_ms=hedge_ms,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    if extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only:
+        profile_name = (
+            extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_profile_name()
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_rend_prebuild_before_desc=True,
+                arti_hs_rend_prebuild_before_desc_shared_hit_only=True,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, coalesce_bytes in enumerate(
+        extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_stream_ready_data_coalesce_bytes
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_stream_ready_data_coalesce_profile_name(
+                coalesce_bytes, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_rend_prebuild_before_desc=True,
+                arti_hs_rend_prebuild_before_desc_shared_hit_only=True,
+                arti_hs_desc_shared_cache=True,
+                arti_stream_ready_data_coalesce_bytes=coalesce_bytes,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, max_active_streams in enumerate(
+        extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_profile_name(
+                max_active_streams, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_rend_prebuild_before_desc=True,
+                arti_hs_rend_prebuild_before_desc_shared_hit_only=True,
+                arti_hs_state_reuse_max_active_streams=max_active_streams,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, (
+        max_active_streams,
+        timeout_ms,
+    ) in enumerate(
+        extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_cold_late_combos
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_cold_late_profile_name(
+                max_active_streams, timeout_ms, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_rend_prebuild_before_desc=True,
+                arti_hs_rend_prebuild_before_desc_shared_hit_only=True,
+                arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms=timeout_ms,
+                arti_hs_state_reuse_max_active_streams=max_active_streams,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, (
+        max_active_streams,
+        timeout_cap_ms,
+    ) in enumerate(
+        extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_startup_only_hsdir_extend_timeout_cap_combos
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_startup_only_hsdir_extend_timeout_cap_profile_name(
+                max_active_streams, timeout_cap_ms, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hspool_client_hsdir_extend_timeout_cap_ms=timeout_cap_ms,
+                arti_hspool_client_hsdir_extend_timeout_cap_startup_only=True,
+                arti_hs_rend_prebuild_before_desc=True,
+                arti_hs_rend_prebuild_before_desc_shared_hit_only=True,
+                arti_hs_state_reuse_max_active_streams=max_active_streams,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, guarded_target in enumerate(
+        extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_guarded_stem_target
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_guarded_stem_target_profile_name(
+                guarded_target, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=guarded_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=False,
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_rend_prebuild_before_desc=True,
+                arti_hs_rend_prebuild_before_desc_shared_hit_only=True,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, timeout_ms in enumerate(
+        extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_cold_late_ms
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_cold_late_profile_name(
+                timeout_ms, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=(
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_rend_prebuild_before_desc=True,
+                arti_hs_rend_prebuild_before_desc_shared_hit_only=True,
+                arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms=timeout_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, hedge_ms in enumerate(
+        extra_arti_hs_desc_shared_cache_intro_circuit_hedge_ms or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_intro_circuit_hedge_profile_name(
+                hedge_ms, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                **base_hspool_guarded_kwargs,
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_hs_intro_circuit_hedge_ms=hedge_ms,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, timeout_cap_ms in enumerate(
+        extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_ms or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_profile_name(
+                timeout_cap_ms, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                **base_hspool_guarded_kwargs,
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hspool_client_hsdir_extend_timeout_cap_ms=timeout_cap_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, timeout_cap_ms in enumerate(
+        extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_startup_only_ms
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_startup_only_profile_name(
+                timeout_cap_ms, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                **base_hspool_guarded_kwargs,
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hspool_client_hsdir_extend_timeout_cap_ms=timeout_cap_ms,
+                arti_hspool_client_hsdir_extend_timeout_cap_startup_only=True,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, timeout_cap_ms in enumerate(
+        extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_post_boot_only_ms
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_post_boot_only_profile_name(
+                timeout_cap_ms, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                **base_hspool_guarded_kwargs,
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                arti_hspool_client_hsdir_extend_timeout_cap_ms=timeout_cap_ms,
+                arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only=True,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    if extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand:
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand_profile_name(
+                0
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                **base_hspool_guarded_kwargs,
+                arti_hspool_background_start_on_demand=True,
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, timeout_cap_ms in enumerate(
+        extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand_hsdir_extend_timeout_cap_startup_only_ms
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand_hsdir_extend_timeout_cap_startup_only_profile_name(
+                timeout_cap_ms, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                **base_hspool_guarded_kwargs,
+                arti_hspool_background_start_on_demand=True,
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_client_hsdir_extend_timeout_cap_ms=timeout_cap_ms,
+                arti_hspool_client_hsdir_extend_timeout_cap_startup_only=True,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, race_ms in enumerate(
+        extra_arti_hs_desc_shared_cache_hspool_on_demand_race_ms or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_hspool_on_demand_race_profile_name(
+                race_ms, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                **base_hspool_guarded_kwargs,
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=race_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, race_ms in enumerate(
+        extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_ms
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_profile_name(
+                race_ms, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                **base_hspool_guarded_kwargs,
+                arti_hspool_background_start_on_demand=True,
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=race_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, (race_ms, hedge_ms) in enumerate(
+        extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge_combos
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge_profile_name(
+                race_ms, hedge_ms, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                **base_hspool_guarded_kwargs,
+                arti_hspool_background_start_on_demand=True,
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=race_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_hs_intro_circuit_hedge_ms=hedge_ms,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, (race_ms, timeout_cap_ms) in enumerate(
+        extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_background_build_timeout_cap_combos
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_background_build_timeout_cap_profile_name(
+                race_ms, timeout_cap_ms, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                **base_hspool_guarded_kwargs,
+                arti_hspool_background_start_on_demand=True,
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=race_ms,
+                arti_hspool_background_build_timeout_cap_ms=timeout_cap_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, (race_ms, timeout_cap_ms) in enumerate(
+        extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_combos
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_profile_name(
+                race_ms, timeout_cap_ms, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_background_start_on_demand=True,
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=race_ms,
+                arti_hspool_client_hsdir_extend_timeout_cap_ms=timeout_cap_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, (race_ms, delay_ms) in enumerate(
+        extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_combos
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_profile_name(
+                race_ms, delay_ms, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=delay_ms,
+                **base_hspool_guarded_kwargs,
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=race_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, (race_ms, delay_ms, launch_parallelism) in enumerate(
+        extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism_combos
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism_profile_name(
+                race_ms, delay_ms, launch_parallelism, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=launch_parallelism,
+                arti_hspool_background_start_delay_ms=delay_ms,
+                **base_hspool_guarded_kwargs,
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=race_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, (race_ms, timeout_cap_ms, guarded_stem_target) in enumerate(
+        extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_boot_combos
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_boot_profile_name(
+                race_ms,
+                timeout_cap_ms,
+                guarded_stem_target,
+                index,
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                arti_hspool_guarded_stem_target=guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=True,
+                arti_hspool_background_start_on_demand=True,
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=race_ms,
+                arti_hspool_client_hsdir_extend_timeout_cap_ms=timeout_cap_ms,
+                arti_hs_desc_shared_cache=True,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=(
+                    arti_socks_connect_soft_timeout_attempts
+                ),
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=arti_exit_select_load_aware,
+                arti_exit_select_health_aware=arti_exit_select_health_aware,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=(
+                    arti_exit_select_avoid_bad_health
+                ),
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=arti_exit_same_isolation_target,
+            )
+        )
+        next_extra_port += 1
+    for index, (race_ms, delay_ms, guarded_stem_target) in enumerate(
+        extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_guarded_stem_target_defer_post_boot_combos
+        or []
+    ):
+        profile_name = (
+            extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_guarded_stem_target_defer_post_boot_profile_name(
+                race_ms, delay_ms, guarded_stem_target, index
+            )
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_exit_launch_parallelism=arti_exit_launch_parallelism,
+                arti_hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                arti_hspool_background_start_delay_ms=delay_ms,
+                arti_hspool_guarded_stem_target=guarded_stem_target,
+                arti_hspool_guarded_stem_target_defer_post_boot=True,
+                arti_hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                arti_hspool_on_demand_race_ms=race_ms,
+                arti_hs_desc_shared_cache=True,
                 arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
                 arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
                 arti_socks_connect_soft_timeout_attempts=(
@@ -7661,6 +11720,53 @@ def run_interleaved_profiles(
             )
         )
         next_extra_port += 1
+    for index, (
+        gap_ms,
+        min_assigned_streams,
+        min_active_streams,
+    ) in enumerate(
+        extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_partial_retry_chunking_bad_health_replacement_gate_combos
+        or []
+    ):
+        profile_name = extra_arti_partial_retry_chunk_bad_health_gate_profile_name(
+            gap_ms, min_assigned_streams, min_active_streams, index
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=arti_socks_connect_soft_timeout_attempts,
+                arti_dir_microdesc_early_usable_notify=True,
+                arti_dir_microdesc_partial_retry_chunking=True,
+                arti_dir_microdesc_bad_health_replacement_suppress_gap_ms=gap_ms,
+                arti_dir_microdesc_bad_health_replacement_suppress_min_assigned_streams=(
+                    min_assigned_streams
+                ),
+                arti_dir_microdesc_bad_health_replacement_suppress_min_active_streams=(
+                    min_active_streams
+                ),
+                arti_dir_microdesc_source_spread=True,
+                arti_dir_microdesc_pending_spread=True,
+                arti_dir_microdesc_retry_ids_per_request=250,
+                arti_dir_microdesc_retry_delay_max_ms=500,
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=False,
+                arti_exit_select_health_aware=False,
+                arti_exit_select_health_min_move_score_bps=None,
+                arti_exit_select_avoid_bad_health=False,
+                arti_exit_select_min_assignment_spread=None,
+                **dir_combo_same_isolation_kwargs,
+            )
+        )
+        next_extra_port += 1
     if (
         extra_arti_dir_microdesc_source_spread_pending_spread_early_usable_partial_retry_chunking_hs_rend_prebuild_before_desc
     ):
@@ -8615,6 +12721,42 @@ def run_interleaved_profiles(
             )
         )
         next_extra_port += 1
+    for index, target in enumerate(
+        extra_arti_exit_select_health_aware_same_isolation_prefer_cold_prewarm_target
+        or []
+    ):
+        profile_name = extra_arti_health_aware_same_iso_prefer_cold_prewarm_profile_name(
+            target, index
+        )
+        specs.append(
+            ProxySpec(
+                name=profile_name,
+                kind="arti",
+                bin_path=arti_bin,
+                port=next_extra_port,
+                output_dir=output_dir / profile_name,
+                log_level=arti_log_level,
+                arti_proxy_buffer_size=arti_proxy_buffer_size,
+                arti_exit_select_parallelism=arti_exit_select_parallelism,
+                arti_min_exit_circs_for_port=arti_min_exit_circs_for_port,
+                arti_socks_connect_soft_timeout_ms=arti_socks_connect_soft_timeout_ms,
+                arti_socks_connect_soft_timeout_attempts=arti_socks_connect_soft_timeout_attempts,
+                arti_exit_pending_hedge_ms=arti_exit_pending_hedge_ms,
+                arti_exit_select_load_aware=True,
+                arti_exit_select_health_aware=True,
+                arti_exit_select_health_min_move_score_bps=(
+                    arti_exit_select_health_min_move_score_bps
+                ),
+                arti_exit_select_avoid_bad_health=False,
+                arti_exit_select_min_assignment_spread=(
+                    arti_exit_select_min_assignment_spread
+                ),
+                arti_exit_same_isolation_target=target,
+                arti_exit_same_isolation_prewarm_first_stream=True,
+                arti_exit_select_prefer_cold_same_isolation=True,
+            )
+        )
+        next_extra_port += 1
     for index, (target, wait_ms) in enumerate(
         extra_arti_exit_select_health_aware_same_isolation_prefer_cold_prewarm_pending_wait
         or []
@@ -9077,14 +13219,29 @@ def run_interleaved_profiles(
                     hspool_background_start_delay_ms=(
                         spec.arti_hspool_background_start_delay_ms
                     ),
+                    hspool_background_start_on_demand=(
+                        spec.arti_hspool_background_start_on_demand
+                    ),
                     hspool_guarded_stem_target=(
                         spec.arti_hspool_guarded_stem_target
                     ),
                     hspool_on_demand_grace_ms=spec.arti_hspool_on_demand_grace_ms,
                     hspool_on_demand_race_ms=spec.arti_hspool_on_demand_race_ms,
+                    hspool_background_build_timeout_cap_ms=(
+                        spec.arti_hspool_background_build_timeout_cap_ms
+                    ),
+                    hspool_client_hsdir_extend_timeout_cap_ms=(
+                        spec.arti_hspool_client_hsdir_extend_timeout_cap_ms
+                    ),
                     hs_intro_rend_overlap=spec.arti_hs_intro_rend_overlap,
                     hs_rend_prebuild_before_desc=(
                         spec.arti_hs_rend_prebuild_before_desc
+                    ),
+                    hs_rend_prebuild_before_desc_shared_hit_only=(
+                        spec.arti_hs_rend_prebuild_before_desc_shared_hit_only
+                    ),
+                    hs_rend_prebuild_cold_after_desc_stream_ready_ms=(
+                        spec.arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms
                     ),
                     hs_desc_shared_cache=spec.arti_hs_desc_shared_cache,
                     hs_intro_circuit_hedge_ms=(
@@ -9104,6 +13261,15 @@ def run_interleaved_profiles(
                 profiles[spec.name]["arti_stream_ready_data_coalesce_bytes"] = (
                     spec.arti_stream_ready_data_coalesce_bytes
                 )
+                profiles[spec.name]["arti_stream_ready_data_coalesce_min_hop"] = (
+                    spec.arti_stream_ready_data_coalesce_min_hop
+                )
+                profiles[spec.name][
+                    "arti_stream_ready_data_coalesce_start_backlog_bytes"
+                ] = spec.arti_stream_ready_data_coalesce_start_backlog_bytes
+                profiles[spec.name][
+                    "arti_stream_ready_data_coalesce_busy_max_bytes"
+                ] = spec.arti_stream_ready_data_coalesce_busy_max_bytes
                 profiles[spec.name]["arti_exit_select_parallelism_override"] = (
                     spec.arti_exit_select_parallelism
                 )
@@ -9255,6 +13421,9 @@ def run_interleaved_profiles(
                 profiles[spec.name]["arti_hspool_background_start_delay_ms"] = (
                     spec.arti_hspool_background_start_delay_ms
                 )
+                profiles[spec.name]["arti_hspool_background_start_on_demand"] = (
+                    spec.arti_hspool_background_start_on_demand
+                )
                 profiles[spec.name]["arti_hspool_guarded_stem_target"] = (
                     spec.arti_hspool_guarded_stem_target
                 )
@@ -9267,17 +13436,41 @@ def run_interleaved_profiles(
                 profiles[spec.name]["arti_hspool_on_demand_race_ms"] = (
                     spec.arti_hspool_on_demand_race_ms
                 )
+                profiles[spec.name]["arti_hspool_background_build_timeout_cap_ms"] = (
+                    spec.arti_hspool_background_build_timeout_cap_ms
+                )
+                profiles[spec.name]["arti_hspool_client_hsdir_extend_timeout_cap_ms"] = (
+                    spec.arti_hspool_client_hsdir_extend_timeout_cap_ms
+                )
+                profiles[spec.name][
+                    "arti_hspool_client_hsdir_extend_timeout_cap_startup_only"
+                ] = spec.arti_hspool_client_hsdir_extend_timeout_cap_startup_only
+                profiles[spec.name][
+                    "arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only"
+                ] = spec.arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only
                 profiles[spec.name]["arti_hs_intro_rend_overlap"] = (
                     spec.arti_hs_intro_rend_overlap
                 )
                 profiles[spec.name]["arti_hs_rend_prebuild_before_desc"] = (
                     spec.arti_hs_rend_prebuild_before_desc
                 )
+                profiles[spec.name][
+                    "arti_hs_rend_prebuild_before_desc_shared_hit_only"
+                ] = spec.arti_hs_rend_prebuild_before_desc_shared_hit_only
+                profiles[spec.name]["arti_hs_state_reuse_max_active_streams"] = (
+                    spec.arti_hs_state_reuse_max_active_streams
+                )
+                profiles[spec.name][
+                    "arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms"
+                ] = spec.arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms
                 profiles[spec.name]["arti_hs_desc_shared_cache"] = (
                     spec.arti_hs_desc_shared_cache
                 )
                 profiles[spec.name]["arti_hs_intro_circuit_hedge_ms"] = (
                     spec.arti_hs_intro_circuit_hedge_ms
+                )
+                profiles[spec.name]["arti_hs_rendezvous_establish_timeout_floor_ms"] = (
+                    spec.arti_hs_rendezvous_establish_timeout_floor_ms
                 )
                 profiles[spec.name].update(
                     effective_arti_exit_selector_metadata(
@@ -9594,16 +13787,43 @@ def start_proxy_for_spec(
         hspool_background_start_delay_ms=(
             spec.arti_hspool_background_start_delay_ms
         ),
+        hspool_background_start_on_demand=(
+            spec.arti_hspool_background_start_on_demand
+        ),
         hspool_guarded_stem_target=spec.arti_hspool_guarded_stem_target,
         hspool_guarded_stem_target_defer_post_boot=(
             spec.arti_hspool_guarded_stem_target_defer_post_boot
         ),
         hspool_on_demand_grace_ms=spec.arti_hspool_on_demand_grace_ms,
         hspool_on_demand_race_ms=spec.arti_hspool_on_demand_race_ms,
+        hspool_background_build_timeout_cap_ms=(
+            spec.arti_hspool_background_build_timeout_cap_ms
+        ),
+        hspool_client_hsdir_extend_timeout_cap_ms=(
+            spec.arti_hspool_client_hsdir_extend_timeout_cap_ms
+        ),
+        hspool_client_hsdir_extend_timeout_cap_startup_only=(
+            spec.arti_hspool_client_hsdir_extend_timeout_cap_startup_only
+        ),
+        hspool_client_hsdir_extend_timeout_cap_post_boot_only=(
+            spec.arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only
+        ),
         hs_intro_circuit_hedge_ms=spec.arti_hs_intro_circuit_hedge_ms,
         hs_rend_prebuild_before_desc=spec.arti_hs_rend_prebuild_before_desc,
+        hs_rend_prebuild_before_desc_shared_hit_only=(
+            spec.arti_hs_rend_prebuild_before_desc_shared_hit_only
+        ),
+        hs_state_reuse_max_active_streams=(
+            spec.arti_hs_state_reuse_max_active_streams
+        ),
+        hs_rend_prebuild_cold_after_desc_stream_ready_ms=(
+            spec.arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms
+        ),
         hs_desc_shared_cache=spec.arti_hs_desc_shared_cache,
         min_exit_circs_for_port=spec.arti_min_exit_circs_for_port,
+        hs_rendezvous_establish_timeout_floor_ms=(
+            spec.arti_hs_rendezvous_establish_timeout_floor_ms
+        ),
         preemptive_443_circs=spec.arti_preemptive_443_circs,
         socks_connect_soft_timeout_ms=spec.arti_socks_connect_soft_timeout_ms,
         socks_connect_soft_timeout_attempts=(
@@ -9616,6 +13836,15 @@ def start_proxy_for_spec(
         ),
         stream_ready_data_coalesce_bytes=(
             spec.arti_stream_ready_data_coalesce_bytes
+        ),
+        stream_ready_data_coalesce_min_hop=(
+            spec.arti_stream_ready_data_coalesce_min_hop
+        ),
+        stream_ready_data_coalesce_start_backlog_bytes=(
+            spec.arti_stream_ready_data_coalesce_start_backlog_bytes
+        ),
+        stream_ready_data_coalesce_busy_max_bytes=(
+            spec.arti_stream_ready_data_coalesce_busy_max_bytes
         ),
         socks_partial_relay_idle_timeout_ms=(
             spec.arti_socks_partial_relay_idle_timeout_ms
@@ -9909,8 +14138,291 @@ def extra_arti_hs_desc_shared_cache_profile_name() -> str:
     return "arti_release_browser_hsdescshare"
 
 
+def extra_arti_hs_desc_shared_cache_stream_scheduler_burst_profile_name(
+    burst: int, index: int
+) -> str:
+    name = f"arti_release_browser_hsdescshare_schedburst{burst}"
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_socks_tor_to_client_coalesce_profile_name(
+    coalesce_bytes: int, index: int
+) -> str:
+    name = f"arti_release_browser_hsdescshare_torclientcoalesce{coalesce_bytes}"
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_profile_name(
+    coalesce_bytes: int, index: int
+) -> str:
+    name = f"arti_release_browser_hsdescshare_streamreadycoalesce{coalesce_bytes}"
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_rendezvous_establish_timeout_floor_profile_name(
+    timeout_floor_ms: int, index: int
+) -> str:
+    name = f"arti_release_browser_hsdescshare_rendfloor{timeout_floor_ms}ms"
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_profile_name(
+    coalesce_bytes: int, min_hop: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsdescshare_"
+        f"streamreadycoalesce{coalesce_bytes}minhop{min_hop}"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_start_backlog_profile_name(
+    coalesce_bytes: int, min_hop: int, start_backlog_bytes: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsdescshare_"
+        f"streamreadycoalesce{coalesce_bytes}minhop{min_hop}"
+        f"backlog{start_backlog_bytes}"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_busy_max_profile_name(
+    coalesce_bytes: int, min_hop: int, busy_max_bytes: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsdescshare_"
+        f"streamreadycoalesce{coalesce_bytes}minhop{min_hop}"
+        f"busymax{busy_max_bytes}"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_rendezvous_establish_timeout_floor_profile_name(
+    coalesce_bytes: int, min_hop: int, timeout_floor_ms: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsdescshare_"
+        f"streamreadycoalesce{coalesce_bytes}minhop{min_hop}"
+        f"rendfloor{timeout_floor_ms}ms"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_rend_prebuild_before_desc_shared_cache_profile_name() -> str:
+    return "arti_release_browser_hsrendpredesc_hsdescshare"
+
+
+def extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_profile_name() -> str:
+    return "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly"
+
+
+def extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_stream_ready_data_coalesce_profile_name(
+    coalesce_bytes: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_"
+        f"streamreadycoalesce{coalesce_bytes}"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_reuse_max_active_streams_profile_name(
+    max_active_streams: int, index: int
+) -> str:
+    name = f"arti_release_browser_hsdescshare_hsreuseactive{max_active_streams}"
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_profile_name(
+    max_active_streams: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_"
+        f"hsreuseactive{max_active_streams}"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_startup_only_hsdir_extend_timeout_cap_profile_name(
+    max_active_streams: int, timeout_cap_ms: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_"
+        f"hsreuseactive{max_active_streams}_hsdirextendcap{timeout_cap_ms}ms_startuponly"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_reuse_max_active_streams_cold_late_profile_name(
+    max_active_streams: int, timeout_ms: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_"
+        f"hsreuseactive{max_active_streams}_coldlate{timeout_ms}ms"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_guarded_stem_target_profile_name(
+    target: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly_"
+        f"hspoolguarded{target}"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_rend_prebuild_before_desc_shared_cache_shared_hit_only_cold_late_profile_name(
+    timeout_ms: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsrendpredesc_hsdescshare_sharedhitonly"
+        f"_coldlate{timeout_ms}ms"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
 def extra_arti_hs_intro_circuit_hedge_profile_name(hedge_ms: int, index: int) -> str:
     name = f"arti_release_browser_hsintrohedge{hedge_ms}ms"
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_intro_circuit_hedge_profile_name(
+    hedge_ms: int, index: int
+) -> str:
+    name = f"arti_release_browser_hsdescshare_hsintrohedge{hedge_ms}ms"
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_profile_name(
+    timeout_cap_ms: int, index: int
+) -> str:
+    name = f"arti_release_browser_hsdescshare_hsdirextendcap{timeout_cap_ms}ms"
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_startup_only_profile_name(
+    timeout_cap_ms: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsdescshare_hsdirextendcap"
+        f"{timeout_cap_ms}ms_startuponly"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_hsdir_extend_timeout_cap_post_boot_only_profile_name(
+    timeout_cap_ms: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsdescshare_hsdirextendcap"
+        f"{timeout_cap_ms}ms_postbootonly"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_hspool_on_demand_race_profile_name(
+    race_ms: int, index: int
+) -> str:
+    name = f"arti_release_browser_hsdescshare_hspoolrace{race_ms}ms"
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_profile_name(
+    race_ms: int, index: int
+) -> str:
+    name = f"arti_release_browser_hsdescshare_hspoolrace{race_ms}ms_hspoolbgondemand"
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand_profile_name(
+    index: int,
+) -> str:
+    name = "arti_release_browser_hsdescshare_hspoolbgondemand"
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_hspool_background_start_on_demand_hsdir_extend_timeout_cap_startup_only_profile_name(
+    timeout_cap_ms: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsdescshare_hspoolbgondemand_hsdirextendcap"
+        f"{timeout_cap_ms}ms_startuponly"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_background_build_timeout_cap_profile_name(
+    race_ms: int, timeout_cap_ms: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsdescshare_hspoolrace"
+        f"{race_ms}ms_hspoolbgondemand_hspoolbgbuildcap{timeout_cap_ms}ms"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_profile_name(
+    race_ms: int, timeout_cap_ms: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsdescshare_hspoolrace"
+        f"{race_ms}ms_hspoolbgondemand_hsdirextendcap{timeout_cap_ms}ms"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_hsdir_extend_timeout_cap_guarded_stem_target_defer_post_boot_profile_name(
+    race_ms: int, timeout_cap_ms: int, guarded_stem_target: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsdescshare_hspoolrace"
+        f"{race_ms}ms_hspoolbgondemand_hsdirextendcap{timeout_cap_ms}ms_"
+        f"hspoolguarded{guarded_stem_target}_deferpostboot"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_hspool_race_background_start_on_demand_intro_circuit_hedge_profile_name(
+    race_ms: int, hedge_ms: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsdescshare_hspoolrace"
+        f"{race_ms}ms_hspoolbgondemand_hsintrohedge{hedge_ms}ms"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_profile_name(
+    race_ms: int, delay_ms: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsdescshare_hspoolrace"
+        f"{race_ms}ms_hspoolstart{delay_ms}ms"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_launch_parallelism_profile_name(
+    race_ms: int, delay_ms: int, launch_parallelism: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsdescshare_hspoolrace"
+        f"{race_ms}ms_hspoolstart{delay_ms}ms_hspoollaunch{launch_parallelism}"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_hs_desc_shared_cache_hspool_race_background_start_delay_guarded_stem_target_defer_post_boot_profile_name(
+    race_ms: int, delay_ms: int, guarded_stem_target: int, index: int
+) -> str:
+    name = (
+        "arti_release_browser_hsdescshare_hspoolrace"
+        f"{race_ms}ms_hspoolstart{delay_ms}ms_"
+        f"hspoolguarded{guarded_stem_target}_deferpostboot"
+    )
     return name if index == 0 else f"{name}_{index + 1}"
 
 
@@ -10040,6 +14552,22 @@ def extra_arti_dir_combo_partial_retry_chunk_bad_health_gate_profile_name(
     name = (
         "arti_release_browser_"
         "mdsrcspreadpendingearlyusable_loadaware_partialretrychunk_"
+        f"badhealthgate{gap_ms}ms_"
+        f"assigned{min_assigned_streams}_"
+        f"active{min_active_streams}"
+    )
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
+def extra_arti_partial_retry_chunk_bad_health_gate_profile_name(
+    gap_ms: int,
+    min_assigned_streams: int,
+    min_active_streams: int,
+    index: int,
+) -> str:
+    name = (
+        "arti_release_browser_"
+        "mdsrcspreadpendingearlyusable_partialretrychunk_"
         f"badhealthgate{gap_ms}ms_"
         f"assigned{min_assigned_streams}_"
         f"active{min_active_streams}"
@@ -10251,6 +14779,13 @@ def extra_arti_prefer_cold_same_iso_prewarm_profile_name(
     return name if index == 0 else f"{name}_{index + 1}"
 
 
+def extra_arti_health_aware_same_iso_prefer_cold_prewarm_profile_name(
+    target: int, index: int
+) -> str:
+    name = f"arti_release_browser_healthaware_sameiso{target}_prefercold_prewarmfirst"
+    return name if index == 0 else f"{name}_{index + 1}"
+
+
 def extra_arti_unknown_fallback_prefer_cold_same_iso_profile_name(
     target: int, index: int
 ) -> str:
@@ -10414,11 +14949,12 @@ def run_c_tor(
     data_dir.mkdir(parents=True, exist_ok=True)
     warmup_boot = None
     if warm_cache:
+        warmup_torrc = output_dir / "warmup.torrc"
         warmup_proc, warmup_lines = start_c_tor(
             tor_bin=tor_bin,
             port=port,
             data_dir=data_dir,
-            torrc=output_dir / "warmup.torrc",
+            torrc=warmup_torrc,
             conflux_client_ux=conflux_client_ux,
         )
         try:
@@ -10436,6 +14972,8 @@ def run_c_tor(
                 "cache_mode": "warm",
                 "warmup_boot": warmup_boot,
                 "boot": {"ok": False, "error": "warmup bootstrap failed"},
+                "torrc": read_torrc_quality(warmup_torrc),
+                "post_boot_wait_seconds": post_boot_wait,
                 "benchmarks": {},
             }
 
@@ -10587,6 +15125,17 @@ def run_arti(
     arti_stream_scheduler_burst: int | None = None,
     arti_exit_select_parallelism: int | None = None,
     arti_exit_launch_parallelism: int | None = None,
+    arti_hspool_launch_parallelism: int | None = None,
+    arti_hspool_background_start_delay_ms: int | None = None,
+    arti_hspool_background_start_on_demand: bool = False,
+    arti_hspool_guarded_stem_target: int | None = None,
+    arti_hspool_guarded_stem_target_defer_post_boot: bool = False,
+    arti_hspool_on_demand_grace_ms: int | None = None,
+    arti_hspool_on_demand_race_ms: int | None = None,
+    arti_hspool_background_build_timeout_cap_ms: int | None = None,
+    arti_hspool_client_hsdir_extend_timeout_cap_ms: int | None = None,
+    arti_hspool_client_hsdir_extend_timeout_cap_startup_only: bool = False,
+    arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only: bool = False,
     arti_min_exit_circs_for_port: int | None = None,
     arti_preemptive_443_circs: int | None = None,
     arti_preemptive_443_burst_min_requests: int | None = None,
@@ -10619,6 +15168,13 @@ def run_arti(
     arti_exit_same_isolation_pending_wait_ms: int | None = None,
     arti_exit_same_isolation_prewarm_first_stream: bool = False,
     arti_exit_select_prefer_cold_same_isolation: bool = False,
+    arti_hs_intro_rend_overlap: bool = False,
+    arti_hs_rend_prebuild_before_desc: bool = False,
+    arti_hs_rend_prebuild_before_desc_shared_hit_only: bool = False,
+    arti_hs_state_reuse_max_active_streams: int | None = None,
+    arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms: int | None = None,
+    arti_hs_desc_shared_cache: bool = False,
+    arti_hs_intro_circuit_hedge_ms: int | None = None,
     proxy_log_tail_lines: int = 200,
     byte_tap: bool = False,
     byte_tap_port_offset: int = 100,
@@ -10668,6 +15224,29 @@ def run_arti(
             stream_scheduler_burst=arti_stream_scheduler_burst,
             exit_select_parallelism=arti_exit_select_parallelism,
             exit_launch_parallelism=arti_exit_launch_parallelism,
+            hspool_launch_parallelism=arti_hspool_launch_parallelism,
+            hspool_background_start_delay_ms=arti_hspool_background_start_delay_ms,
+            hspool_background_start_on_demand=(
+                arti_hspool_background_start_on_demand
+            ),
+            hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+            hspool_guarded_stem_target_defer_post_boot=(
+                arti_hspool_guarded_stem_target_defer_post_boot
+            ),
+            hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+            hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+            hspool_background_build_timeout_cap_ms=(
+                arti_hspool_background_build_timeout_cap_ms
+            ),
+            hspool_client_hsdir_extend_timeout_cap_ms=(
+                arti_hspool_client_hsdir_extend_timeout_cap_ms
+            ),
+            hspool_client_hsdir_extend_timeout_cap_startup_only=(
+                arti_hspool_client_hsdir_extend_timeout_cap_startup_only
+            ),
+            hspool_client_hsdir_extend_timeout_cap_post_boot_only=(
+                arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only
+            ),
             min_exit_circs_for_port=arti_min_exit_circs_for_port,
             preemptive_443_circs=arti_preemptive_443_circs,
             preemptive_443_burst_min_requests=(
@@ -10738,6 +15317,19 @@ def run_arti(
             exit_select_prefer_cold_same_isolation=(
                 arti_exit_select_prefer_cold_same_isolation
             ),
+            hs_intro_rend_overlap=arti_hs_intro_rend_overlap,
+            hs_rend_prebuild_before_desc=arti_hs_rend_prebuild_before_desc,
+            hs_rend_prebuild_before_desc_shared_hit_only=(
+                arti_hs_rend_prebuild_before_desc_shared_hit_only
+            ),
+            hs_state_reuse_max_active_streams=(
+                arti_hs_state_reuse_max_active_streams
+            ),
+            hs_rend_prebuild_cold_after_desc_stream_ready_ms=(
+                arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms
+            ),
+            hs_desc_shared_cache=arti_hs_desc_shared_cache,
+            hs_intro_circuit_hedge_ms=arti_hs_intro_circuit_hedge_ms,
         )
         try:
             warmup_boot = wait_for_line(
@@ -10754,13 +15346,71 @@ def run_arti(
                 "cache_mode": "warm",
                 "warmup_boot": warmup_boot,
                 "arti_log_level": effective_arti_log_level(
-                    arti_log_level, arti_socks_relay_byte_timing
+                    log_level=arti_log_level,
+                    socks_relay_byte_timing=arti_socks_relay_byte_timing,
+                    hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                    hspool_background_start_delay_ms=(
+                        arti_hspool_background_start_delay_ms
+                    ),
+                    hspool_background_start_on_demand=(
+                        arti_hspool_background_start_on_demand
+                    ),
+                    hspool_guarded_stem_target=(
+                        arti_hspool_guarded_stem_target
+                    ),
+                    hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                    hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                    hspool_background_build_timeout_cap_ms=(
+                        arti_hspool_background_build_timeout_cap_ms
+                    ),
+                    hspool_client_hsdir_extend_timeout_cap_ms=(
+                        arti_hspool_client_hsdir_extend_timeout_cap_ms
+                    ),
+                    hs_intro_rend_overlap=arti_hs_intro_rend_overlap,
+                    hs_rend_prebuild_before_desc=(
+                        arti_hs_rend_prebuild_before_desc
+                    ),
+                    hs_rend_prebuild_before_desc_shared_hit_only=(
+                        arti_hs_rend_prebuild_before_desc_shared_hit_only
+                    ),
+                    hs_rend_prebuild_cold_after_desc_stream_ready_ms=(
+                        arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms
+                    ),
+                    hs_desc_shared_cache=arti_hs_desc_shared_cache,
+                    hs_intro_circuit_hedge_ms=arti_hs_intro_circuit_hedge_ms,
                 ),
                 "arti_proxy_buffer_size": arti_proxy_buffer_size,
                 "arti_proxy_app_buffer_len": arti_proxy_app_buffer_len,
                 "arti_stream_scheduler_burst": arti_stream_scheduler_burst,
                 "arti_exit_select_parallelism_override": arti_exit_select_parallelism,
                 "arti_exit_launch_parallelism_override": arti_exit_launch_parallelism,
+                "arti_hspool_launch_parallelism": arti_hspool_launch_parallelism,
+                "arti_hspool_background_start_delay_ms": (
+                    arti_hspool_background_start_delay_ms
+                ),
+                "arti_hspool_background_start_on_demand": (
+                    arti_hspool_background_start_on_demand
+                ),
+                "arti_hspool_guarded_stem_target": (
+                    arti_hspool_guarded_stem_target
+                ),
+                "arti_hspool_guarded_stem_target_defer_post_boot": (
+                    arti_hspool_guarded_stem_target_defer_post_boot
+                ),
+                "arti_hspool_on_demand_grace_ms": arti_hspool_on_demand_grace_ms,
+                "arti_hspool_on_demand_race_ms": arti_hspool_on_demand_race_ms,
+                "arti_hspool_background_build_timeout_cap_ms": (
+                    arti_hspool_background_build_timeout_cap_ms
+                ),
+                "arti_hspool_client_hsdir_extend_timeout_cap_ms": (
+                    arti_hspool_client_hsdir_extend_timeout_cap_ms
+                ),
+                "arti_hspool_client_hsdir_extend_timeout_cap_startup_only": (
+                    arti_hspool_client_hsdir_extend_timeout_cap_startup_only
+                ),
+                "arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only": (
+                    arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only
+                ),
                 "arti_min_exit_circs_for_port_override": (
                     arti_min_exit_circs_for_port
                 ),
@@ -10839,6 +15489,23 @@ def run_arti(
                 "arti_exit_select_prefer_cold_same_isolation": (
                     arti_exit_select_prefer_cold_same_isolation
                 ),
+                "arti_hs_intro_rend_overlap": arti_hs_intro_rend_overlap,
+                "arti_hs_rend_prebuild_before_desc": (
+                    arti_hs_rend_prebuild_before_desc
+                ),
+                "arti_hs_rend_prebuild_before_desc_shared_hit_only": (
+                    arti_hs_rend_prebuild_before_desc_shared_hit_only
+                ),
+                "arti_hs_state_reuse_max_active_streams": (
+                    arti_hs_state_reuse_max_active_streams
+                ),
+                "arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms": (
+                    arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms
+                ),
+                "arti_hs_desc_shared_cache": arti_hs_desc_shared_cache,
+                "arti_hs_intro_circuit_hedge_ms": (
+                    arti_hs_intro_circuit_hedge_ms
+                ),
                 "arti_preemptive_443_burst_min_requests": (
                     arti_preemptive_443_burst_min_requests
                 ),
@@ -10864,6 +15531,27 @@ def run_arti(
         stream_scheduler_burst=arti_stream_scheduler_burst,
         exit_select_parallelism=arti_exit_select_parallelism,
         exit_launch_parallelism=arti_exit_launch_parallelism,
+        hspool_launch_parallelism=arti_hspool_launch_parallelism,
+        hspool_background_start_delay_ms=arti_hspool_background_start_delay_ms,
+        hspool_background_start_on_demand=arti_hspool_background_start_on_demand,
+        hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+        hspool_guarded_stem_target_defer_post_boot=(
+            arti_hspool_guarded_stem_target_defer_post_boot
+        ),
+        hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+        hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+        hspool_background_build_timeout_cap_ms=(
+            arti_hspool_background_build_timeout_cap_ms
+        ),
+        hspool_client_hsdir_extend_timeout_cap_ms=(
+            arti_hspool_client_hsdir_extend_timeout_cap_ms
+        ),
+        hspool_client_hsdir_extend_timeout_cap_startup_only=(
+            arti_hspool_client_hsdir_extend_timeout_cap_startup_only
+        ),
+        hspool_client_hsdir_extend_timeout_cap_post_boot_only=(
+            arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only
+        ),
         min_exit_circs_for_port=arti_min_exit_circs_for_port,
         preemptive_443_circs=arti_preemptive_443_circs,
         preemptive_443_burst_min_requests=arti_preemptive_443_burst_min_requests,
@@ -10922,6 +15610,17 @@ def run_arti(
         exit_select_prefer_cold_same_isolation=(
             arti_exit_select_prefer_cold_same_isolation
         ),
+        hs_intro_rend_overlap=arti_hs_intro_rend_overlap,
+        hs_rend_prebuild_before_desc=arti_hs_rend_prebuild_before_desc,
+        hs_rend_prebuild_before_desc_shared_hit_only=(
+            arti_hs_rend_prebuild_before_desc_shared_hit_only
+        ),
+        hs_state_reuse_max_active_streams=arti_hs_state_reuse_max_active_streams,
+        hs_rend_prebuild_cold_after_desc_stream_ready_ms=(
+            arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms
+        ),
+        hs_desc_shared_cache=arti_hs_desc_shared_cache,
+        hs_intro_circuit_hedge_ms=arti_hs_intro_circuit_hedge_ms,
     )
     try:
         boot = wait_for_line(
@@ -10937,13 +15636,65 @@ def run_arti(
             "boot": boot,
             "post_boot_wait_seconds": post_boot_wait,
             "arti_log_level": effective_arti_log_level(
-                arti_log_level, arti_socks_relay_byte_timing
+                log_level=arti_log_level,
+                socks_relay_byte_timing=arti_socks_relay_byte_timing,
+                hspool_launch_parallelism=arti_hspool_launch_parallelism,
+                hspool_background_start_delay_ms=(
+                    arti_hspool_background_start_delay_ms
+                ),
+                hspool_background_start_on_demand=(
+                    arti_hspool_background_start_on_demand
+                ),
+                hspool_guarded_stem_target=arti_hspool_guarded_stem_target,
+                hspool_on_demand_grace_ms=arti_hspool_on_demand_grace_ms,
+                hspool_on_demand_race_ms=arti_hspool_on_demand_race_ms,
+                hspool_background_build_timeout_cap_ms=(
+                    arti_hspool_background_build_timeout_cap_ms
+                ),
+                hspool_client_hsdir_extend_timeout_cap_ms=(
+                    arti_hspool_client_hsdir_extend_timeout_cap_ms
+                ),
+                hs_intro_rend_overlap=arti_hs_intro_rend_overlap,
+                hs_rend_prebuild_before_desc=arti_hs_rend_prebuild_before_desc,
+                hs_rend_prebuild_before_desc_shared_hit_only=(
+                    arti_hs_rend_prebuild_before_desc_shared_hit_only
+                ),
+                hs_rend_prebuild_cold_after_desc_stream_ready_ms=(
+                    arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms
+                ),
+                hs_desc_shared_cache=arti_hs_desc_shared_cache,
+                hs_intro_circuit_hedge_ms=arti_hs_intro_circuit_hedge_ms,
             ),
             "arti_proxy_buffer_size": arti_proxy_buffer_size,
             "arti_proxy_app_buffer_len": arti_proxy_app_buffer_len,
             "arti_stream_scheduler_burst": arti_stream_scheduler_burst,
             "arti_exit_select_parallelism_override": arti_exit_select_parallelism,
             "arti_exit_launch_parallelism_override": arti_exit_launch_parallelism,
+            "arti_hspool_launch_parallelism": arti_hspool_launch_parallelism,
+            "arti_hspool_background_start_delay_ms": (
+                arti_hspool_background_start_delay_ms
+            ),
+            "arti_hspool_background_start_on_demand": (
+                arti_hspool_background_start_on_demand
+            ),
+            "arti_hspool_guarded_stem_target": arti_hspool_guarded_stem_target,
+            "arti_hspool_guarded_stem_target_defer_post_boot": (
+                arti_hspool_guarded_stem_target_defer_post_boot
+            ),
+            "arti_hspool_on_demand_grace_ms": arti_hspool_on_demand_grace_ms,
+            "arti_hspool_on_demand_race_ms": arti_hspool_on_demand_race_ms,
+            "arti_hspool_background_build_timeout_cap_ms": (
+                arti_hspool_background_build_timeout_cap_ms
+            ),
+            "arti_hspool_client_hsdir_extend_timeout_cap_ms": (
+                arti_hspool_client_hsdir_extend_timeout_cap_ms
+            ),
+            "arti_hspool_client_hsdir_extend_timeout_cap_startup_only": (
+                arti_hspool_client_hsdir_extend_timeout_cap_startup_only
+            ),
+            "arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only": (
+                arti_hspool_client_hsdir_extend_timeout_cap_post_boot_only
+            ),
             "arti_min_exit_circs_for_port_override": arti_min_exit_circs_for_port,
             "arti_preemptive_443_circs": arti_preemptive_443_circs,
             "arti_socks_connect_soft_timeout_ms": arti_socks_connect_soft_timeout_ms,
@@ -11016,6 +15767,21 @@ def run_arti(
             "arti_exit_select_prefer_cold_same_isolation": (
                 arti_exit_select_prefer_cold_same_isolation
             ),
+            "arti_hs_intro_rend_overlap": arti_hs_intro_rend_overlap,
+            "arti_hs_rend_prebuild_before_desc": (
+                arti_hs_rend_prebuild_before_desc
+            ),
+            "arti_hs_rend_prebuild_before_desc_shared_hit_only": (
+                arti_hs_rend_prebuild_before_desc_shared_hit_only
+            ),
+            "arti_hs_state_reuse_max_active_streams": (
+                arti_hs_state_reuse_max_active_streams
+            ),
+            "arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms": (
+                arti_hs_rend_prebuild_cold_after_desc_stream_ready_ms
+            ),
+            "arti_hs_desc_shared_cache": arti_hs_desc_shared_cache,
+            "arti_hs_intro_circuit_hedge_ms": arti_hs_intro_circuit_hedge_ms,
             "arti_preemptive_443_burst_min_requests": (
                 arti_preemptive_443_burst_min_requests
             ),
@@ -11094,10 +15860,15 @@ def start_arti(
     exit_launch_parallelism: int | None = None,
     hspool_launch_parallelism: int | None = None,
     hspool_background_start_delay_ms: int | None = None,
+    hspool_background_start_on_demand: bool = False,
     hspool_guarded_stem_target: int | None = None,
     hspool_guarded_stem_target_defer_post_boot: bool = False,
     hspool_on_demand_grace_ms: int | None = None,
     hspool_on_demand_race_ms: int | None = None,
+    hspool_background_build_timeout_cap_ms: int | None = None,
+    hspool_client_hsdir_extend_timeout_cap_ms: int | None = None,
+    hspool_client_hsdir_extend_timeout_cap_startup_only: bool = False,
+    hspool_client_hsdir_extend_timeout_cap_post_boot_only: bool = False,
     min_exit_circs_for_port: int | None = None,
     preemptive_443_circs: int | None = None,
     preemptive_443_burst_min_requests: int | None = None,
@@ -11108,6 +15879,9 @@ def start_arti(
     socks_relay_byte_timing: bool = False,
     socks_tor_to_client_coalesce_bytes: int | None = None,
     stream_ready_data_coalesce_bytes: int | None = None,
+    stream_ready_data_coalesce_min_hop: int | None = None,
+    stream_ready_data_coalesce_start_backlog_bytes: int | None = None,
+    stream_ready_data_coalesce_busy_max_bytes: int | None = None,
     socks_partial_relay_idle_timeout_ms: int | None = None,
     socks_no_tor_byte_relay_timeout_ms: int | None = None,
     exit_pending_hedge_ms: int | None = None,
@@ -11135,8 +15909,12 @@ def start_arti(
     exit_select_prefer_cold_same_isolation: bool = False,
     hs_intro_rend_overlap: bool = False,
     hs_rend_prebuild_before_desc: bool = False,
+    hs_rend_prebuild_before_desc_shared_hit_only: bool = False,
+    hs_state_reuse_max_active_streams: int | None = None,
+    hs_rend_prebuild_cold_after_desc_stream_ready_ms: int | None = None,
     hs_desc_shared_cache: bool = False,
     hs_intro_circuit_hedge_ms: int | None = None,
+    hs_rendezvous_establish_timeout_floor_ms: int | None = None,
     dir_select_spread: bool = False,
     dir_incremental_microdescs: bool = False,
     dir_microdesc_early_usable_notify: bool = False,
@@ -11168,11 +15946,24 @@ def start_arti(
         socks_relay_byte_timing=socks_relay_byte_timing,
         hspool_launch_parallelism=hspool_launch_parallelism,
         hspool_background_start_delay_ms=hspool_background_start_delay_ms,
+        hspool_background_start_on_demand=hspool_background_start_on_demand,
         hspool_guarded_stem_target=hspool_guarded_stem_target,
         hspool_on_demand_grace_ms=hspool_on_demand_grace_ms,
         hspool_on_demand_race_ms=hspool_on_demand_race_ms,
+        hspool_background_build_timeout_cap_ms=(
+            hspool_background_build_timeout_cap_ms
+        ),
+        hspool_client_hsdir_extend_timeout_cap_ms=(
+            hspool_client_hsdir_extend_timeout_cap_ms
+        ),
         hs_intro_rend_overlap=hs_intro_rend_overlap,
         hs_rend_prebuild_before_desc=hs_rend_prebuild_before_desc,
+        hs_rend_prebuild_before_desc_shared_hit_only=(
+            hs_rend_prebuild_before_desc_shared_hit_only
+        ),
+        hs_rend_prebuild_cold_after_desc_stream_ready_ms=(
+            hs_rend_prebuild_cold_after_desc_stream_ready_ms
+        ),
         hs_desc_shared_cache=hs_desc_shared_cache,
         hs_intro_circuit_hedge_ms=hs_intro_circuit_hedge_ms,
     )
@@ -11237,6 +16028,8 @@ def start_arti(
         env["TORFAST_HSPOOL_BACKGROUND_START_DELAY_MS"] = str(
             hspool_background_start_delay_ms
         )
+    if hspool_background_start_on_demand:
+        env["TORFAST_HSPOOL_BACKGROUND_START_ON_DEMAND"] = "1"
     if hspool_guarded_stem_target is not None:
         env["TORFAST_HSPOOL_GUARDED_STEM_TARGET"] = str(hspool_guarded_stem_target)
     if hspool_guarded_stem_target_defer_post_boot:
@@ -11249,14 +16042,40 @@ def start_arti(
         env["TORFAST_HSPOOL_ON_DEMAND_POOL_RACE_MS"] = str(
             hspool_on_demand_race_ms
         )
+    if hspool_background_build_timeout_cap_ms is not None:
+        env["TORFAST_HSPOOL_BACKGROUND_BUILD_TIMEOUT_CAP_MS"] = str(
+            hspool_background_build_timeout_cap_ms
+        )
+    if hspool_client_hsdir_extend_timeout_cap_ms is not None:
+        env["TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_MS"] = str(
+            hspool_client_hsdir_extend_timeout_cap_ms
+        )
+    if hspool_client_hsdir_extend_timeout_cap_startup_only:
+        env["TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_STARTUP_ONLY"] = "1"
+    if hspool_client_hsdir_extend_timeout_cap_post_boot_only:
+        env["TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_POST_BOOT_ONLY"] = "1"
     if hs_intro_rend_overlap:
         env["TORFAST_HS_INTRO_REND_OVERLAP"] = "1"
     if hs_rend_prebuild_before_desc:
         env["TORFAST_HS_REND_PREBUILD_BEFORE_DESC"] = "1"
+    if hs_rend_prebuild_before_desc_shared_hit_only:
+        env["TORFAST_HS_REND_PREBUILD_BEFORE_DESC_SHARED_HIT_ONLY"] = "1"
+    if hs_state_reuse_max_active_streams is not None:
+        env["TORFAST_HS_STATE_REUSE_MAX_ACTIVE_STREAMS"] = str(
+            hs_state_reuse_max_active_streams
+        )
+    if hs_rend_prebuild_cold_after_desc_stream_ready_ms is not None:
+        env["TORFAST_HS_REND_PREBUILD_COLD_AFTER_DESC_STREAM_READY_MS"] = str(
+            hs_rend_prebuild_cold_after_desc_stream_ready_ms
+        )
     if hs_desc_shared_cache:
         env["TORFAST_HS_DESC_SHARED_CACHE"] = "1"
     if hs_intro_circuit_hedge_ms is not None:
         env["TORFAST_HS_INTRO_CIRCUIT_HEDGE_MS"] = str(hs_intro_circuit_hedge_ms)
+    if hs_rendezvous_establish_timeout_floor_ms is not None:
+        env["TORFAST_HS_RENDEZVOUS_ESTABLISH_TIMEOUT_FLOOR_MS"] = str(
+            hs_rendezvous_establish_timeout_floor_ms
+        )
     if socks_connect_soft_timeout_ms is not None:
         env["TORFAST_SOCKS_CONNECT_SOFT_TIMEOUT_MS"] = str(
             socks_connect_soft_timeout_ms
@@ -11280,6 +16099,18 @@ def start_arti(
     if stream_ready_data_coalesce_bytes is not None:
         env["TORFAST_STREAM_READY_DATA_COALESCE_BYTES"] = str(
             stream_ready_data_coalesce_bytes
+        )
+    if stream_ready_data_coalesce_min_hop is not None:
+        env["TORFAST_STREAM_READY_DATA_COALESCE_MIN_HOP"] = str(
+            stream_ready_data_coalesce_min_hop
+        )
+    if stream_ready_data_coalesce_start_backlog_bytes is not None:
+        env["TORFAST_STREAM_READY_DATA_COALESCE_START_BACKLOG_BYTES"] = str(
+            stream_ready_data_coalesce_start_backlog_bytes
+        )
+    if stream_ready_data_coalesce_busy_max_bytes is not None:
+        env["TORFAST_STREAM_READY_DATA_COALESCE_BUSY_MAX_BYTES"] = str(
+            stream_ready_data_coalesce_busy_max_bytes
         )
     if stream_scheduler_burst is not None:
         env["TORFAST_STREAM_SCHEDULER_BURST"] = str(stream_scheduler_burst)
@@ -11657,7 +16488,7 @@ def run_browser_once(
 
             screenshot = client.command("WebDriver:TakeScreenshot", {})
             raw_png = base64.b64decode(screenshot["value"])
-            screenshot_path.write_bytes(raw_png)
+            write_browser_screenshot(screenshot_path, raw_png)
 
             current_url = optional_command(client, "WebDriver:GetCurrentURL")
             title = optional_command(client, "WebDriver:GetTitle")
@@ -11834,6 +16665,9 @@ def record_proxy_run_signals(
 ) -> None:
     all_drained = drain_queue(lines)
     drained = proxy_lines_in_run_window(all_drained, run)
+    pre_run_hspool_proof_context = proxy_pre_run_hspool_proof_lines(
+        all_drained, run
+    )
     pre_run_selection_context = proxy_pre_run_circuit_selection_context_lines(
         all_drained, drained, run
     )
@@ -11842,7 +16676,9 @@ def record_proxy_run_signals(
         tail = drained[-run_tail_limit:]
         if tail:
             run["proxy_output_tail"] = tail
-    signal_lines = proxy_signal_lines(pre_run_selection_context + drained)
+    signal_lines = proxy_signal_lines(
+        pre_run_hspool_proof_context + pre_run_selection_context + drained
+    )
     if not signal_lines:
         relay_context_lines = proxy_relay_context_lines(drained)
         if relay_context_lines:
@@ -11925,6 +16761,28 @@ def proxy_pre_run_circuit_selection_context_lines(
             for run_circuit in run_circuits
         ):
             context.append(text)
+    return context
+
+
+def proxy_pre_run_hspool_proof_lines(
+    all_lines: list[str],
+    run: dict[str, object],
+    *,
+    start_grace_ms: float = 250.0,
+) -> list[str]:
+    start_ms = numeric_value(run.get("started_epoch_ms"))
+    if start_ms is None:
+        return []
+    window_start = start_ms - start_grace_ms
+    context = []
+    for line in all_lines:
+        text = str(line)
+        if "torfast hspool client hsdir extend timeout" not in text:
+            continue
+        event_ms = proxy_line_epoch_ms(text)
+        if event_ms is None or event_ms >= window_start:
+            continue
+        context.append(text)
     return context
 
 
@@ -12352,8 +17210,9 @@ class MarionetteClient:
         self.next_id += 1
         command_id = self.next_id
         self.write_packet([0, command_id, name, params])
+        deadline = self._response_deadline()
         while True:
-            packet = self.read_packet()
+            packet = self.read_packet(deadline=deadline)
             if (
                 isinstance(packet, list)
                 and len(packet) >= 4
@@ -12369,10 +17228,36 @@ class MarionetteClient:
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         self.sock.sendall(str(len(data)).encode("ascii") + b":" + data)
 
-    def read_packet(self) -> object:
+    def _response_deadline(self) -> float | None:
+        timeout = self.sock.gettimeout()
+        if timeout is None:
+            return None
+        return time.monotonic() + timeout
+
+    def _recv_with_deadline(self, size: int, *, deadline: float | None) -> bytes:
+        timeout = self.sock.gettimeout()
+        restore_timeout = False
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("marionette response timed out")
+            if timeout is None or remaining < timeout:
+                self.sock.settimeout(remaining)
+                restore_timeout = True
+        try:
+            return self.sock.recv(size)
+        except socket.timeout as exc:
+            raise TimeoutError("marionette response timed out") from exc
+        finally:
+            if restore_timeout:
+                self.sock.settimeout(timeout)
+
+    def read_packet(self, *, deadline: float | None = None) -> object:
+        if deadline is None:
+            deadline = self._response_deadline()
         length_bytes = b""
         while True:
-            char = self.sock.recv(1)
+            char = self._recv_with_deadline(1, deadline=deadline)
             if char == b":":
                 break
             if not char:
@@ -12381,7 +17266,7 @@ class MarionetteClient:
         length = int(length_bytes)
         data = b""
         while len(data) < length:
-            chunk = self.sock.recv(length - len(data))
+            chunk = self._recv_with_deadline(length - len(data), deadline=deadline)
             if not chunk:
                 raise EOFError("marionette socket closed during packet body")
             data += chunk
@@ -13423,44 +18308,7 @@ def validate_browser_quality_prefs(pref_audit: dict[str, object]) -> dict[str, o
 
 
 def collect_browser_fingerprint_snapshot(client: MarionetteClient) -> dict[str, object]:
-    script = r"""
-const nav = navigator;
-const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
-const snapshot = {
-  userAgent: nav.userAgent || null,
-  platform: nav.platform || null,
-  oscpu: nav.oscpu || null,
-  language: nav.language || null,
-  languages: Array.isArray(nav.languages) ? Array.from(nav.languages) : [],
-  hardwareConcurrency:
-    Number.isFinite(nav.hardwareConcurrency) ? nav.hardwareConcurrency : null,
-  maxTouchPoints:
-    Number.isFinite(nav.maxTouchPoints) ? nav.maxTouchPoints : null,
-  webdriver: nav.webdriver === true,
-  doNotTrack: nav.doNotTrack ?? null,
-  cookieEnabled: nav.cookieEnabled ?? null,
-  timezone,
-  timezoneOffset: new Date().getTimezoneOffset(),
-  colorDepth: screen.colorDepth ?? null,
-  pixelDepth: screen.pixelDepth ?? null,
-  innerWidth: window.innerWidth ?? null,
-  innerHeight: window.innerHeight ?? null,
-  outerWidth: window.outerWidth ?? null,
-  outerHeight: window.outerHeight ?? null,
-  screenWidth: screen.width ?? null,
-  screenHeight: screen.height ?? null,
-  availWidth: screen.availWidth ?? null,
-  availHeight: screen.availHeight ?? null,
-  devicePixelRatio:
-    Number.isFinite(window.devicePixelRatio) ? window.devicePixelRatio : null,
-  reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-  forcedColors: window.matchMedia("(forced-colors: active)").matches,
-  darkScheme: window.matchMedia("(prefers-color-scheme: dark)").matches,
-  pluginsLength: nav.plugins ? nav.plugins.length : null,
-  mimeTypesLength: nav.mimeTypes ? nav.mimeTypes.length : null,
-};
-return JSON.stringify(snapshot);
-"""
+    script = FINGERPRINT_SNAPSHOT_JS_BODY + "\nreturn JSON.stringify(snapshot);\n"
     try:
         result = client.command(
             "WebDriver:ExecuteScript",
@@ -13571,41 +18419,7 @@ canvas { display: block; image-rendering: pixelated; }
 </style>
 <canvas id="fingerprint"></canvas>
 <script>
-const nav = navigator;
-const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || null;
-const snapshot = {
-  userAgent: nav.userAgent || null,
-  platform: nav.platform || null,
-  oscpu: nav.oscpu || null,
-  language: nav.language || null,
-  languages: Array.isArray(nav.languages) ? Array.from(nav.languages) : [],
-  hardwareConcurrency:
-    Number.isFinite(nav.hardwareConcurrency) ? nav.hardwareConcurrency : null,
-  maxTouchPoints:
-    Number.isFinite(nav.maxTouchPoints) ? nav.maxTouchPoints : null,
-  webdriver: nav.webdriver === true,
-  doNotTrack: nav.doNotTrack ?? null,
-  cookieEnabled: nav.cookieEnabled ?? null,
-  timezone,
-  timezoneOffset: new Date().getTimezoneOffset(),
-  colorDepth: screen.colorDepth ?? null,
-  pixelDepth: screen.pixelDepth ?? null,
-  innerWidth: window.innerWidth ?? null,
-  innerHeight: window.innerHeight ?? null,
-  outerWidth: window.outerWidth ?? null,
-  outerHeight: window.outerHeight ?? null,
-  screenWidth: screen.width ?? null,
-  screenHeight: screen.height ?? null,
-  availWidth: screen.availWidth ?? null,
-  availHeight: screen.availHeight ?? null,
-  devicePixelRatio:
-    Number.isFinite(window.devicePixelRatio) ? window.devicePixelRatio : null,
-  reducedMotion: window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-  forcedColors: window.matchMedia("(forced-colors: active)").matches,
-  darkScheme: window.matchMedia("(prefers-color-scheme: dark)").matches,
-  pluginsLength: nav.plugins ? nav.plugins.length : null,
-  mimeTypesLength: nav.mimeTypes ? nav.mimeTypes.length : null,
-};
+""" + FINGERPRINT_SNAPSHOT_JS_BODY + r"""
 const payload = new TextEncoder().encode(JSON.stringify(snapshot));
 const bytes = [
   84, 66, 70, 49,
@@ -13773,6 +18587,7 @@ def validate_browser_fingerprint_snapshot(
     snapshot_audit: dict[str, object],
     *,
     allow_webdriver_artifact: bool = False,
+    require_rfp_behaviors: bool = False,
 ) -> dict[str, object]:
     failures: list[str] = []
     if not snapshot_audit.get("ok"):
@@ -13795,7 +18610,42 @@ def validate_browser_fingerprint_snapshot(
             "timezone: expected a zero-offset Tor Browser zone, "
             f"got {timezone!r}"
         )
+    canvas_probe = snapshot.get("canvasProbe")
+    if isinstance(canvas_probe, dict):
+        if canvas_probe.get("extractionBlocked") is not True:
+            failures.append(
+                "canvasProbe.extractionBlocked: expected True, got "
+                f"{canvas_probe.get('extractionBlocked')!r}"
+            )
+    elif require_rfp_behaviors:
+        failures.append("canvasProbe: canvas extraction probe missing")
+    if require_rfp_behaviors:
+        if snapshot.get("colorDepth") != 24:
+            failures.append(
+                f"colorDepth: expected 24, got {snapshot.get('colorDepth')!r}"
+            )
+        if snapshot.get("maxTouchPoints") != 0:
+            failures.append(
+                f"maxTouchPoints: expected 0, got {snapshot.get('maxTouchPoints')!r}"
+            )
     return {"ok": not failures, "failures": failures}
+
+
+def stable_fingerprint_reference_failures(
+    snapshot: dict[str, object] | None,
+    reference_snapshot: dict[str, object] | None,
+) -> list[str]:
+    if not isinstance(snapshot, dict):
+        return ["browser fingerprint snapshot missing for reference comparison"]
+    if not isinstance(reference_snapshot, dict):
+        return ["reference fingerprint snapshot missing"]
+    failures: list[str] = []
+    for key in STABLE_FINGERPRINT_REFERENCE_KEYS:
+        actual = snapshot.get(key)
+        expected = reference_snapshot.get(key)
+        if actual != expected:
+            failures.append(f"{key}: expected {expected!r}, got {actual!r}")
+    return failures
 
 
 def parse_pref_value(raw: str) -> object:
@@ -13832,6 +18682,15 @@ def png_info(path: Path) -> dict[str, object]:
         "width": width,
         "height": height,
     }
+
+
+def write_browser_screenshot(path: Path, raw_png: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.write_bytes(raw_png)
+    except FileNotFoundError:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(raw_png)
 
 
 def browser_net_log_env(log_path: Path) -> dict[str, str]:

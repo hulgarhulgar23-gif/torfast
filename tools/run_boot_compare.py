@@ -17,7 +17,9 @@ import threading
 from run_browser_compare import (
     binary_info,
     cleanup_named_paths,
+    extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_profile_name,
     parse_dir_bad_health_gate_combos,
+    parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos,
     read_torrc_quality,
     start_arti,
     start_c_tor,
@@ -33,6 +35,9 @@ class BootSpec:
     bin_path: Path
     port: int
     hs_desc_shared_cache: bool = False
+    stream_ready_data_coalesce_bytes: int | None = None
+    stream_ready_data_coalesce_min_hop: int | None = None
+    stream_ready_data_coalesce_start_backlog_bytes: int | None = None
     dir_select_spread: bool = False
     dir_incremental_microdescs: bool = False
     dir_microdesc_early_usable_notify: bool = False
@@ -78,6 +83,11 @@ def main() -> int:
     parser.add_argument("--arti-log-level", default="info")
     parser.add_argument("--arti-dir-select-spread", action="store_true")
     parser.add_argument("--extra-arti-hs-desc-shared-cache", action="store_true")
+    parser.add_argument(
+        "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-combo",
+        action="append",
+        default=[],
+    )
     parser.add_argument("--extra-arti-dir-select-spread", action="store_true")
     parser.add_argument("--extra-arti-dir-select-spread-port", type=int, default=19183)
     parser.add_argument("--extra-arti-dir-incremental-microdescs", action="store_true")
@@ -301,6 +311,30 @@ def main() -> int:
     if invalid_microdesc_hedges:
         print("--extra-arti-dir-microdesc-hedge-ms must be between 2000 and 10000")
         return 2
+    try:
+        extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos = (
+            parse_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos(
+                args.extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combo,
+                option=(
+                    "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-"
+                    "min-hop-combo"
+                ),
+            )
+        )
+    except ValueError as exc:
+        print(str(exc))
+        return 2
+    invalid_extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos = [
+        combo
+        for combo in extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos
+        if not (498 <= combo[0] <= 65536 and 1 <= combo[1] <= 16)
+    ]
+    if invalid_extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos:
+        print(
+            "--extra-arti-hs-desc-shared-cache-stream-ready-data-coalesce-min-hop-combo "
+            "values must use COALESCE_BYTES 498..65536 and MIN_HOP 1..16"
+        )
+        return 2
 
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     output_dir = Path("results") / f"boot-compare-{run_id}"
@@ -330,7 +364,29 @@ def main() -> int:
                 dirclient_timing_log=args.arti_dirclient_timing_log,
             )
         )
-    
+    for index, (coalesce_bytes, min_hop) in enumerate(
+        extra_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_combos
+    ):
+        specs.append(
+            BootSpec(
+                extra_arti_hs_desc_shared_cache_stream_ready_data_coalesce_min_hop_profile_name(
+                    coalesce_bytes,
+                    min_hop,
+                    index,
+                ).replace("arti_release_browser_", "arti_release_boot_"),
+                "arti",
+                arti_bin,
+                next_free_port(
+                    [spec.port for spec in specs] + [args.local_tor_port],
+                    start=args.extra_arti_dir_select_spread_port,
+                ),
+                hs_desc_shared_cache=True,
+                stream_ready_data_coalesce_bytes=coalesce_bytes,
+                stream_ready_data_coalesce_min_hop=min_hop,
+                dirclient_timing_log=args.arti_dirclient_timing_log,
+            )
+        )
+
     if args.extra_arti_dir_select_spread:
         specs.append(
             BootSpec(
@@ -668,6 +724,15 @@ def main() -> int:
                 "kind": spec.kind,
                 "port": spec.port,
                 "arti_hs_desc_shared_cache": spec.hs_desc_shared_cache,
+                "arti_stream_ready_data_coalesce_bytes": (
+                    spec.stream_ready_data_coalesce_bytes
+                ),
+                "arti_stream_ready_data_coalesce_min_hop": (
+                    spec.stream_ready_data_coalesce_min_hop
+                ),
+                "arti_stream_ready_data_coalesce_start_backlog_bytes": (
+                    spec.stream_ready_data_coalesce_start_backlog_bytes
+                ),
                 "arti_dir_select_spread": spec.dir_select_spread,
                 "arti_dir_incremental_microdescs": spec.dir_incremental_microdescs,
                 "arti_dir_microdesc_early_usable_notify": (
@@ -842,6 +907,15 @@ def start_boot_proxy(
             state_dir=state_dir,
             log_level=arti_log_level,
             hs_desc_shared_cache=spec.hs_desc_shared_cache,
+            stream_ready_data_coalesce_bytes=(
+                spec.stream_ready_data_coalesce_bytes
+            ),
+            stream_ready_data_coalesce_min_hop=(
+                spec.stream_ready_data_coalesce_min_hop
+            ),
+            stream_ready_data_coalesce_start_backlog_bytes=(
+                spec.stream_ready_data_coalesce_start_backlog_bytes
+            ),
             dir_select_spread=spec.dir_select_spread,
             dir_incremental_microdescs=spec.dir_incremental_microdescs,
             dir_microdesc_early_usable_notify=(

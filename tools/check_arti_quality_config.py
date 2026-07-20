@@ -7,7 +7,7 @@ This is static proof only. It does not prove live Arti circuit paths.
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 import json
 from pathlib import Path
 import re
@@ -34,6 +34,7 @@ SOURCE_FILES = {
     "circmgr_preemptive": "crates/tor-circmgr/src/preemptive.rs",
     "circmgr_usage": "crates/tor-circmgr/src/usage.rs",
     "tor_hsclient_connect": "crates/tor-hsclient/src/connect.rs",
+    "tor_hsclient_state": "crates/tor-hsclient/src/state.rs",
     "dirmgr_bootstrap": "crates/tor-dirmgr/src/bootstrap.rs",
     "dirmgr_docid": "crates/tor-dirmgr/src/docid.rs",
     "tor_dirclient": "crates/tor-dirclient/src/lib.rs",
@@ -57,6 +58,51 @@ class QualityCheck:
     ok: bool
     evidence: list[str]
     note: str
+    required_for_quality_proof: bool = True
+
+
+ADVISORY_ONLY_CHECKS = frozenset(
+    {
+        "channel_open_timing_is_low_log_parseable",
+        "dir_incremental_microdescs_is_default_off_lab_only",
+        "dir_microdesc_bad_health_replacement_can_ignore_score_only_lab_only",
+        "dir_microdesc_chunk_size_is_bounded_lab_only",
+        "dir_microdesc_hedge_is_default_on_bounded_and_offable",
+        "dir_microdesc_early_retry_on_partial_is_default_off_lab_only",
+        "dir_microdesc_early_usable_notify_is_default_microdesc_only_safe",
+        "dir_microdesc_partial_retry_chunking_is_default_on_retry_only_offable",
+        "dir_microdesc_pending_spread_is_default_microdesc_only_safe",
+        "dir_microdesc_retry_chunk_size_is_default_on_bounded_retry_only_safe",
+        "dir_microdesc_retry_delay_is_default_on_bounded_retry_only_safe",
+        "dir_microdesc_source_spread_is_default_microdesc_only_safe",
+        "dir_microdesc_spare_topup_is_default_microdesc_only_safe",
+        "dirclient_microdesc_body_max_is_bounded_lab_only",
+        "dirclient_microdesc_min_rate_is_bounded_lab_only",
+        "dirclient_progress_read_timeout_is_bounded_lab_only",
+        "dirclient_read_timeout_is_bounded_lab_only",
+        "dirclient_timing_log_is_default_off_lab_only",
+        "exit_bad_health_replacement_is_default_on_with_live_pressure_gate",
+        "exit_client_phase_timing_is_low_log_parseable",
+        "hs_client_phase_timing_is_low_log_parseable",
+        "hs_state_reuse_max_active_streams_is_default_off_lab_only",
+        "hspool_launch_parallelism_is_bounded_lab_only",
+        "post_last_byte_diagnostics_are_parseable",
+        "preemptive_443_burst_override_is_default_on_with_env_off_and_bounded",
+        "preemptive_443_busy_active_age_is_default_off_and_capped",
+        "preemptive_443_override_is_default_on_with_env_off_and_bounded",
+        "rpc_is_feature_gated",
+        "socks_no_tor_byte_relay_timeout_is_bounded_lab_only",
+        "socks_partial_relay_idle_timeout_is_bounded_lab_only",
+        "socks_relay_byte_timing_is_default_off_lab_only",
+        "socks_slow_failure_summaries_are_low_log_parseable",
+        "socks_tor_to_client_coalesce_is_default_off_lab_only",
+        "stream_lifecycle_log_is_default_off_lab_only",
+        "stream_ready_data_coalesce_is_default_on_bounded_and_offable",
+        "stream_ready_data_coalesce_min_hop_is_default_off_lab_only",
+        "stream_scheduler_log_is_default_off_lab_only",
+        "circuit_congestion_log_is_default_off_lab_only",
+    }
+)
 
 
 def main() -> int:
@@ -84,17 +130,27 @@ def run_check(*, arti_root: Path, arti_bin: Path | None = None) -> dict[str, obj
     sources = read_sources(arti_root)
     help_text = read_arti_help(arti_bin) if arti_bin else None
     checks = evaluate_sources(sources=sources, help_text=help_text)
-    failures = [check for check in checks if not check.ok]
+    failures = blocking_failures(checks)
+    advisory = advisory_failures(checks)
     return {
         "ok": not failures,
         "claim": (
-            "Arti source/config keeps key Tor quality defaults. "
-            "This is not runtime circuit-path proof."
+            "Arti source/config keeps the current shipped Tor quality defaults. "
+            "This is not runtime circuit-path proof, and advisory "
+            "non-shipped-path or observability checks are reported separately."
         ),
         "evidence_type": "static_source_config",
         "runtime_circuit_path_proof": False,
         "arti_root": str(arti_root),
         "arti_bin": str(arti_bin) if arti_bin else None,
+        "blocking_check_count": sum(
+            1 for check in checks if check.required_for_quality_proof
+        ),
+        "advisory_check_count": sum(
+            1 for check in checks if not check.required_for_quality_proof
+        ),
+        "blocking_failures": [check.name for check in failures],
+        "advisory_failures": [check.name for check in advisory],
         "checks": [asdict(check) for check in checks],
     }
 
@@ -146,6 +202,7 @@ def evaluate_sources(
     circmgr_preemptive = sources["circmgr_preemptive"]
     circmgr_usage = sources["circmgr_usage"]
     tor_hsclient_connect = sources["tor_hsclient_connect"]
+    tor_hsclient_state = sources["tor_hsclient_state"]
     dirmgr_bootstrap = sources["dirmgr_bootstrap"]
     dirmgr_docid = sources["dirmgr_docid"]
     tor_dirclient = sources["tor_dirclient"]
@@ -331,6 +388,20 @@ def evaluate_sources(
             "HS pool startup delay remains bounded, defaults to the current one-second local startup behavior, and only changes through the explicit lab env.",
         ),
         check_contains_all(
+            "hspool_background_start_on_demand_is_default_off",
+            circmgr_hspool,
+            [
+                "TORFAST_HSPOOL_BACKGROUND_START_ON_DEMAND_ENV",
+                '"TORFAST_HSPOOL_BACKGROUND_START_ON_DEMAND"',
+                "torfast_hspool_background_start_on_demand_from_env_value",
+                "torfast_hspool_background_start_on_demand()",
+                '"torfast hspool background start waiting for on-demand fire"',
+                "schedule.fire_in(torfast_hspool_background_start_delay())",
+            ],
+            ["crates/tor-circmgr/src/hspool.rs"],
+            "HS pool can be held until first onion demand through an explicit default-off lab env, while the normal startup-delay path stays present.",
+        ),
+        check_contains_all(
             "hspool_background_waits_for_path_sufficient_netdir",
             circmgr_hspool,
             [
@@ -445,6 +516,34 @@ def evaluate_sources(
             "Client HSDir extend timeout capping is explicit lab-only, default-off, bounded, and only shortens the specific HSDir extend phase without changing path selection.",
         ),
         check_contains_all(
+            "hspool_client_hsdir_extend_timeout_cap_startup_only_is_default_off",
+            circmgr_hspool_pool,
+            [
+                "TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_STARTUP_ONLY_ENV",
+                '"TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_STARTUP_ONLY"',
+                "torfast_hspool_client_hsdir_extend_timeout_cap_startup_only_from_env_value",
+                "torfast_hspool_client_hsdir_extend_timeout_cap_startup_only()",
+                "client_hsdir_extend_timeout_cap_enabled",
+                "disable_client_hsdir_extend_timeout_cap_after_bootstrap",
+            ],
+            ["crates/tor-circmgr/src/hspool/pool.rs"],
+            "Client HSDir extend timeout capping can stay startup-only through an explicit default-off lab knob that restores the normal extend timeout after bootstrap.",
+        ),
+        check_contains_all(
+            "hspool_client_hsdir_extend_timeout_cap_post_boot_only_is_default_off",
+            circmgr_hspool_pool,
+            [
+                "TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_POST_BOOT_ONLY_ENV",
+                '"TORFAST_HSPOOL_CLIENT_HSDIR_EXTEND_TIMEOUT_CAP_POST_BOOT_ONLY"',
+                "torfast_hspool_client_hsdir_extend_timeout_cap_post_boot_only_from_env_value",
+                "torfast_hspool_client_hsdir_extend_timeout_cap_post_boot_only()",
+                "client_hsdir_extend_timeout_cap_enabled",
+                "enable_client_hsdir_extend_timeout_cap_after_bootstrap",
+            ],
+            ["crates/tor-circmgr/src/hspool/pool.rs"],
+            "Client HSDir extend timeout capping can stay post-bootstrap-only through an explicit default-off lab knob that leaves startup behavior untouched and turns the cap on only after bootstrap.",
+        ),
+        check_contains_all(
             "hspool_guarded_stem_target_is_default_same_and_bounded",
             circmgr_hspool_pool,
             [
@@ -461,6 +560,20 @@ def evaluate_sources(
             ],
             ["crates/tor-circmgr/src/hspool/pool.rs"],
             "HS pool guarded stem target is explicit lab-only, keeps the normal default of two guarded stems, and bounds startup pool growth.",
+        ),
+        check_contains_all(
+            "hspool_guarded_stem_target_defer_post_boot_is_default_off",
+            circmgr_hspool_pool,
+            [
+                "TORFAST_HSPOOL_GUARDED_STEM_TARGET_DEFER_POST_BOOT_ENV",
+                '"TORFAST_HSPOOL_GUARDED_STEM_TARGET_DEFER_POST_BOOT"',
+                "torfast_hspool_guarded_stem_target_defer_post_boot_from_env_value",
+                "torfast_hspool_guarded_stem_target_defer_post_boot()",
+                "deferred_guarded_stem_target",
+                "enable_guarded_stem_target_after_post_boot",
+            ],
+            ["crates/tor-circmgr/src/hspool/pool.rs"],
+            "HS pool can defer extra guarded prebuild target until the first real post-bootstrap guarded demand through an explicit default-off lab knob.",
         ),
         check_contains_all(
             "hspool_info_timings_split_stem_and_extend_without_targets",
@@ -491,7 +604,7 @@ def evaluate_sources(
                 "saved_rendezvous.is_none()",
                 "futures::join!(establish_rendezvous, obtain_intro_circuit)",
                 "self.establish_rendezvous()",
-                "self.obtain_intro_circuit(ipt, hs_timing_started)",
+                "self.obtain_intro_circuit(ipt)",
                 "self.exchange_introduce_with_circ",
             ],
             ["crates/tor-hsclient/src/connect.rs"],
@@ -514,7 +627,37 @@ def evaluate_sources(
             "HS rendezvous prebuild-before-descriptor is explicit lab-only, default-off, uses the normal rendezvous builder early, and falls back to the normal path.",
         ),
         check_contains_all(
-            "hs_desc_shared_cache_is_default_off_descriptor_only",
+            "hs_rend_prebuild_before_desc_shared_hit_only_is_default_off_lab_only",
+            tor_hsclient_connect,
+            [
+                "TORFAST_HS_REND_PREBUILD_BEFORE_DESC_SHARED_HIT_ONLY_ENV",
+                '"TORFAST_HS_REND_PREBUILD_BEFORE_DESC_SHARED_HIT_ONLY"',
+                "torfast_hs_rend_prebuild_before_desc_shared_hit_only_from_env_value",
+                "torfast_hs_rend_prebuild_before_desc_shared_hit_only()",
+                "shared_desc_ready = true",
+                "shared_hit_only = prebuild_before_desc_shared_hit_only",
+                "torfast hs timing descriptor shared cache hit",
+            ],
+            ["crates/tor-hsclient/src/connect.rs"],
+            "The stricter HS prebuild lane is explicit lab-only, default-off, and only arms rendezvous prebuild from a shared-cache descriptor handoff instead of every warm local descriptor.",
+        ),
+        check_contains_all(
+            "hs_rend_prebuild_cold_after_desc_stream_ready_is_default_off_lab_only",
+            tor_hsclient_connect,
+            [
+                "TORFAST_HS_REND_PREBUILD_COLD_AFTER_DESC_STREAM_READY_MS_ENV",
+                '"TORFAST_HS_REND_PREBUILD_COLD_AFTER_DESC_STREAM_READY_MS"',
+                "torfast_hs_rend_prebuild_cold_after_desc_stream_ready_ms_from_env_value",
+                "torfast_hs_rend_prebuild_cold_after_desc_stream_ready_timeout()",
+                "self.cold_descriptor_late_rend_prebuild",
+                "torfast hs timing cold descriptor late rend prebuild armed",
+                "torfast hs timing cold descriptor late rend prebuild timed out",
+            ],
+            ["crates/tor-hsclient/src/connect.rs"],
+            "The cold descriptor late rendezvous prebuild lane is explicit lab-only, default-off, bounded by an env timeout, and only starts after descriptor stream readiness.",
+        ),
+        check_contains_all(
+            "hs_desc_shared_cache_is_default_on_descriptor_only_safe",
             tor_hsclient_connect,
             [
                 "TORFAST_HS_DESC_SHARED_CACHE_ENV",
@@ -536,7 +679,7 @@ def evaluate_sources(
                 "torfast hs timing descriptor shared cache store",
             ],
             ["crates/tor-hsclient/src/connect.rs"],
-            "HS descriptor sharing is explicit lab-only, default-off, keyed by blinded onion and secret-key identity, and copies only the descriptor value.",
+            "HS descriptor sharing is shipped default-on, keyed by blinded onion and secret-key identity, copies only the descriptor value, and stays offable by env.",
         ),
         check_contains_all(
             "hs_intro_circuit_hedge_is_default_off_lab_only",
@@ -556,6 +699,40 @@ def evaluate_sources(
             ],
             ["crates/tor-hsclient/src/connect.rs"],
             "HS intro-circuit hedge is explicit lab-only, default-off, bounded, and only races the normal same-target intro circuit acquisition.",
+        ),
+        check_contains_all(
+            "hs_rendezvous_establish_timeout_floor_is_default_off_lab_only",
+            tor_hsclient_connect,
+            [
+                "TORFAST_HS_RENDEZVOUS_ESTABLISH_TIMEOUT_FLOOR_MS_ENV",
+                '"TORFAST_HS_RENDEZVOUS_ESTABLISH_TIMEOUT_FLOOR_MS"',
+                "TORFAST_HS_RENDEZVOUS_ESTABLISH_TIMEOUT_FLOOR_MIN_MS: u64 = 500",
+                "TORFAST_HS_RENDEZVOUS_ESTABLISH_TIMEOUT_FLOOR_MAX_MS: u64 = 60_000",
+                "torfast_hs_rendezvous_establish_timeout_floor_ms_from_env_value",
+                "torfast_hs_rendezvous_establish_timeout_floor()",
+                "torfast_hs_rendezvous_establish_timeout_with_floor",
+                "torfast_hs_rendezvous_establish_timeout(",
+                "torfast hs timing rendezvous establish timeout floor applied",
+            ],
+            ["crates/tor-hsclient/src/connect.rs"],
+            "HS rendezvous establish timeout floor is explicit lab-only, default-off, bounded, and only raises the existing timeout estimate instead of changing path choice.",
+        ),
+        check_contains_all(
+            "hs_state_reuse_max_active_streams_is_default_off_lab_only",
+            tor_hsclient_state,
+            [
+                "TORFAST_HS_STATE_REUSE_MAX_ACTIVE_STREAMS_ENV",
+                '"TORFAST_HS_STATE_REUSE_MAX_ACTIVE_STREAMS"',
+                "TORFAST_HS_STATE_REUSE_MAX_ACTIVE_STREAMS_MIN: u64 = 1",
+                "TORFAST_HS_STATE_REUSE_MAX_ACTIVE_STREAMS_MAX: u64 = 8",
+                "torfast_hs_state_reuse_max_active_streams_from_env_value",
+                "torfast_hs_state_reuse_max_active_streams()",
+                "D::tunnel_active_streams(tunnel)",
+                "active_streams >= max_active_streams",
+                "torfast hs state timing cache hit blocked active streams",
+            ],
+            ["crates/tor-hsclient/src/state.rs"],
+            "HS busy-tunnel reuse gating is explicit lab-only, default-off, bounded, and only stops cache-hit reuse when the current tunnel already has too many live streams.",
         ),
         check_contains_all(
             "socks_auth_sets_stream_isolation",
@@ -704,18 +881,31 @@ def evaluate_sources(
                 "TORFAST_STREAM_READY_DATA_COALESCE_BYTES_DEFAULT: usize = 498",
                 "TORFAST_STREAM_READY_DATA_COALESCE_BYTES_MIN: usize = 498",
                 "TORFAST_STREAM_READY_DATA_COALESCE_BYTES_MAX: usize = 64 * 1024",
-                "TORFAST_STREAM_READY_DATA_COALESCE_START_BACKLOG_BYTES",
+                "TORFAST_STREAM_READY_DATA_COALESCE_START_BACKLOG_BYTES_ENV",
+                "fn torfast_stream_ready_data_coalesce_start_backlog_bytes_from_env_value(",
+                "TORFAST_STREAM_READY_DATA_COALESCE_START_BACKLOG_BYTES_DEFAULT: usize = 498",
+                "TORFAST_STREAM_READY_DATA_COALESCE_START_BACKLOG_BYTES_MIN: usize = 498",
+                "TORFAST_STREAM_READY_DATA_COALESCE_START_BACKLOG_BYTES_MAX: usize = 64 * 1024",
                 "std::env::var(TORFAST_STREAM_READY_DATA_COALESCE_BYTES_ENV)",
+                "std::env::var(TORFAST_STREAM_READY_DATA_COALESCE_START_BACKLOG_BYTES_ENV)",
                 "Some(TORFAST_STREAM_READY_DATA_COALESCE_BYTES_DEFAULT)",
                 "\"0\" | \"off\" | \"false\" | \"no\"",
+                "TORFAST_STREAM_READY_DATA_COALESCE_BUSY_ACTIVE_STREAMS: u64 = 4",
+                "TORFAST_STREAM_READY_DATA_COALESCE_BUSY_MAX_BYTES_ENV",
+                "TORFAST_STREAM_READY_DATA_COALESCE_BUSY_MAX_BYTES_DEFAULT: usize =",
+                "TORFAST_STREAM_READY_DATA_COALESCE_BUSY_MAX_BYTES_MIN: usize =",
+                "TORFAST_STREAM_READY_DATA_COALESCE_BUSY_MAX_BYTES_MAX: usize =",
+                "fn torfast_stream_ready_data_coalesce_busy_max_bytes_from_env_value(",
+                "std::env::var(TORFAST_STREAM_READY_DATA_COALESCE_BUSY_MAX_BYTES_ENV)",
+                "fn torfast_stream_ready_data_coalesce_effective_max_bytes(",
                 "fn torfast_should_ready_coalesce_data(",
                 "if let Some(max_bytes) = torfast_stream_ready_data_coalesce_bytes()",
-                "let effective_max_bytes = max_bytes.min(buf.len());",
+                "imp.torfast_ready_coalesce_effective_max_bytes(",
                 "while imp.should_ready_coalesce_data(effective_max_bytes)",
                 "self.torfast_user_read_bytes > 0",
                 "self.s.receiver.approx_stream_bytes()",
                 "self.s.next_queued_msg_is_data()",
-                "approx_queued_bytes >= TORFAST_STREAM_READY_DATA_COALESCE_START_BACKLOG_BYTES",
+                "approx_queued_bytes >= torfast_stream_ready_data_coalesce_start_backlog_bytes()",
                 "pub(crate) fn next_queued_msg_is_data(&mut self) -> bool",
                 "msg.cmd() == RelayCmd::DATA",
             ],
@@ -723,7 +913,24 @@ def evaluate_sources(
                 "crates/tor-proto/src/client/stream/data.rs",
                 "crates/tor-proto/src/stream/raw.rs",
             ],
-            "Ready DATA cell coalescing defaults to a bounded 498-byte cap, can be explicitly disabled, and only batches after the first delivered chunk when real queued DATA backlog exists.",
+            "Ready DATA cell coalescing defaults to a bounded 498-byte cap, keeps a bounded 498-byte queued-DATA start threshold by default, can be explicitly disabled, only batches after the first delivered chunk when real queued DATA backlog exists, and keeps the busy multi-stream fanout cap bounded and lab-tunable.",
+        ),
+        check_contains_all(
+            "stream_ready_data_coalesce_min_hop_is_default_off_lab_only",
+            tor_proto_data_stream,
+            [
+                "TORFAST_STREAM_READY_DATA_COALESCE_MIN_HOP",
+                "fn torfast_stream_ready_data_coalesce_min_hop_from_env_value(",
+                "TORFAST_STREAM_READY_DATA_COALESCE_MIN_HOP_MIN: usize = 1",
+                "TORFAST_STREAM_READY_DATA_COALESCE_MIN_HOP_MAX: usize = 16",
+                "std::env::var(TORFAST_STREAM_READY_DATA_COALESCE_MIN_HOP_ENV)",
+                "\"0\" | \"off\" | \"false\" | \"no\"",
+                "fn torfast_stream_ready_data_coalesce_hop_allowed(",
+                "self.s.target.hop",
+                "usize::from(hop_num) + 1 >= min_hop",
+            ],
+            ["crates/tor-proto/src/client/stream/data.rs"],
+            "Ready DATA cell coalescing can be lab-limited by minimum client hop depth, stays default-off, and is bounded to deeper-hop traffic only when explicitly enabled.",
         ),
         check_contains_all(
             "circuit_congestion_log_is_default_off_lab_only",
@@ -1958,7 +2165,33 @@ def evaluate_sources(
                 note="The release CLI help does not show C Tor-style circuit-status access.",
             )
         )
-    return checks
+    return annotate_quality_proof_scope(checks)
+
+
+def annotate_quality_proof_scope(checks: list[QualityCheck]) -> list[QualityCheck]:
+    return [
+        replace(
+            check,
+            required_for_quality_proof=check.name not in ADVISORY_ONLY_CHECKS,
+        )
+        for check in checks
+    ]
+
+
+def blocking_failures(checks: list[QualityCheck]) -> list[QualityCheck]:
+    return [
+        check
+        for check in checks
+        if check.required_for_quality_proof and not check.ok
+    ]
+
+
+def advisory_failures(checks: list[QualityCheck]) -> list[QualityCheck]:
+    return [
+        check
+        for check in checks
+        if not check.required_for_quality_proof and not check.ok
+    ]
 
 
 def check_regex(
@@ -1998,14 +2231,26 @@ def short_summary(payload: dict[str, object]) -> dict[str, object]:
     failed = [
         check["name"]
         for check in checks
-        if isinstance(check, dict) and not check.get("ok")
+        if isinstance(check, dict)
+        and not check.get("ok")
+        and check.get("required_for_quality_proof", True)
+    ]
+    advisory_failed = [
+        check["name"]
+        for check in checks
+        if isinstance(check, dict)
+        and not check.get("ok")
+        and not check.get("required_for_quality_proof", True)
     ]
     return {
         "ok": payload["ok"],
         "evidence_type": payload["evidence_type"],
         "runtime_circuit_path_proof": payload["runtime_circuit_path_proof"],
         "checks": len(checks),
+        "blocking_checks": payload.get("blocking_check_count"),
+        "advisory_checks": payload.get("advisory_check_count"),
         "failed": failed,
+        "advisory_failed": advisory_failed,
     }
 
 

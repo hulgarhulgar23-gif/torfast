@@ -28,7 +28,9 @@ For the full running log, see [Latest Results](latest-results.md).
   `proof-summary-v0.1.0.md`.
 - First quality-preserving speed finding: C Tor Conflux, with standard 3-hop
   circuits kept intact, showed about `2-3x` bulk-download throughput versus
-  disabling it.
+  disabling it. Conflux is the shipped default and the circuit quality check
+  now proves it is live at runtime (linked conflux legs on the control port),
+  so the win cannot silently regress.
 - Warm/open proof under
   `results/torfast-warm-open-fresh-browser-proof-20260624T165129/` shows the
   repeated-open path keeps Tor warm for speed while clearing old browser state

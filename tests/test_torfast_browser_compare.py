@@ -18,10 +18,15 @@ from run_torfast_browser_compare import (
     SEEDED_CIRCUIT_READY_PROFILE,
     annotate_general_circuit_ready,
     build_arg_parser,
+    bundled_seeded_block_profile_name,
     bundled_seeded_conflux_ux_profile_name,
     bundled_seeded_general_circuits_profile_name,
+    bundled_seeded_maxconn_profile_name,
+    bundled_seeded_serial_http_profile_name,
     cycle_order,
     launch_ready_seconds_for_run,
+    parse_extra_browser_block_url_substrings,
+    parse_extra_browser_connection_cap_values,
     parse_extra_conflux_ux_values,
     parse_min_general_circuit_counts,
     parse_extra_wait_values,
@@ -30,6 +35,7 @@ from run_torfast_browser_compare import (
     profile_min_general_circuit_count,
     profile_extra_post_boot_wait_seconds,
     profile_run_ok,
+    resolve_selected_profiles,
     run_measured_c_tor_browser,
     resolve_targets,
     seeded_wait_profile_name,
@@ -89,6 +95,27 @@ class TorfastBrowserCompareTests(unittest.TestCase):
             ["throughput", "latency"],
         )
 
+    def test_parser_accepts_bundled_seeded_browser_diagnostic_variant_flags(self) -> None:
+        args = build_arg_parser().parse_args(
+            [
+                "--extra-bundled-seeded-browser-block-url-substring",
+                "/static/js/fallback.js",
+                "--extra-bundled-seeded-browser-max-persistent-connections-per-server",
+                "10",
+                "--extra-bundled-seeded-browser-serial-http-connections",
+            ]
+        )
+
+        self.assertEqual(
+            args.extra_bundled_seeded_browser_block_url_substring,
+            ["/static/js/fallback.js"],
+        )
+        self.assertEqual(
+            args.extra_bundled_seeded_browser_max_persistent_connections_per_server,
+            ["10"],
+        )
+        self.assertTrue(args.extra_bundled_seeded_browser_serial_http_connections)
+
     def test_parser_accepts_browser_request_blocker_flags(self) -> None:
         args = build_arg_parser().parse_args(
             [
@@ -118,6 +145,25 @@ class TorfastBrowserCompareTests(unittest.TestCase):
             "/tmp/torfast-browser-startup-seed",
         )
         self.assertFalse(args.no_browser_startup_seed)
+
+    def test_parser_accepts_profile_selection_flags(self) -> None:
+        args = build_arg_parser().parse_args(
+            ["--profiles", "bundled", "bundled-seeded,cold"]
+        )
+
+        self.assertEqual(args.profiles, ["bundled", "bundled-seeded,cold"])
+
+    def test_parser_accepts_reuse_dir_cache_seed_flags(self) -> None:
+        args = build_arg_parser().parse_args(
+            [
+                "--reuse-dir-cache-seed",
+                "--dir-cache-seed-root",
+                "/tmp/torfast-c-tor-dir-cache-seed",
+            ]
+        )
+
+        self.assertTrue(args.reuse_dir_cache_seed)
+        self.assertEqual(args.dir_cache_seed_root, "/tmp/torfast-c-tor-dir-cache-seed")
 
     def test_cycle_order_rotates_profiles(self) -> None:
         self.assertEqual(
@@ -197,6 +243,28 @@ class TorfastBrowserCompareTests(unittest.TestCase):
             parse_extra_conflux_ux_values(["throughput", "throughput", "latency"]),
             ["throughput", "latency"],
         )
+        self.assertEqual(
+            parse_extra_browser_block_url_substrings(
+                ["/static/js/fallback.js", "/static/js/fallback.js"]
+            ),
+            ["/static/js/fallback.js"],
+        )
+        self.assertEqual(
+            parse_extra_browser_connection_cap_values(["10", "10", "6"]),
+            [10, 6],
+        )
+        self.assertEqual(
+            bundled_seeded_block_profile_name("/static/js/fallback.js"),
+            "bundled_c_tor_browser_seeded_block_static-js-fallback-js",
+        )
+        self.assertEqual(
+            bundled_seeded_maxconn_profile_name(10),
+            "bundled_c_tor_browser_seeded_maxconn_10",
+        )
+        self.assertEqual(
+            bundled_seeded_serial_http_profile_name(),
+            "bundled_c_tor_browser_seeded_serialhttp",
+        )
 
     def test_resolve_targets_uses_named_pack_or_explicit_override(self) -> None:
         self.assertEqual(resolve_targets("focused", None), DEFAULT_TARGETS)
@@ -205,6 +273,33 @@ class TorfastBrowserCompareTests(unittest.TestCase):
             resolve_targets("broader", ["https://example.com/", "https://openai.com/"]),
             ["https://example.com/", "https://openai.com/"],
         )
+
+    def test_resolve_selected_profiles_accepts_aliases_and_preserves_base_order(self) -> None:
+        available = [
+            BUNDLED_PROFILE,
+            BUNDLED_SEEDED_PROFILE,
+            COLD_PROFILE,
+            SEEDED_PROFILE,
+            SEEDED_CIRCUIT_READY_PROFILE,
+        ]
+
+        selected = resolve_selected_profiles(
+            available,
+            ["seeded-general-circuit", "bundled-seeded,cold"],
+        )
+
+        self.assertEqual(
+            selected,
+            [
+                BUNDLED_SEEDED_PROFILE,
+                COLD_PROFILE,
+                SEEDED_CIRCUIT_READY_PROFILE,
+            ],
+        )
+
+    def test_resolve_selected_profiles_rejects_unknown_names(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unknown profile"):
+            resolve_selected_profiles([COLD_PROFILE, SEEDED_PROFILE], ["bundled"])
 
     def test_profile_run_ok_requires_seed_proof_for_seeded_profile(self) -> None:
         seeded_run = {
@@ -250,6 +345,26 @@ class TorfastBrowserCompareTests(unittest.TestCase):
         bundled_seeded_run["seed_prime"] = None
 
         self.assertFalse(profile_run_ok(bundled_seeded_run))
+
+    def test_profile_run_ok_accepts_reused_shared_seed_for_seeded_profile(self) -> None:
+        seeded_run = {
+            "profile": BUNDLED_SEEDED_PROFILE,
+            "boot": {"ok": True, "seconds": 2.8},
+            "seed_prime": {
+                "ok": True,
+                "reused": True,
+                "reason": "reused shared dir-cache seed",
+            },
+            "seed_apply": {"ok": True, "applied": True},
+            "benchmarks": {
+                "https://check.torproject.org/": {
+                    "summary": {"ok": True},
+                    "runs": [browser_run(ok=True, elapsed_ms=900.0, load_ms=700.0)],
+                }
+            },
+        }
+
+        self.assertTrue(profile_run_ok(seeded_run))
 
     def test_run_measured_profile_forwards_browser_request_blocker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

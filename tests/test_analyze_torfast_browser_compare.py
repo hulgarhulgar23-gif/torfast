@@ -25,6 +25,8 @@ from analyze_torfast_browser_compare import (
     resource_delta_rows,
     resource_tail_summary_rows,
     same_origin_pressure_summary_rows,
+    startup_family_schedule_delta_rows,
+    startup_family_schedule_rows,
     top_resource_rows,
 )
 
@@ -952,6 +954,147 @@ def pre_network_cancel_payload() -> dict[str, object]:
     }
 
 
+def startup_schedule_payload() -> dict[str, object]:
+    def make_browser(
+        *,
+        css_start: float,
+        js_start: float,
+        font_start: float,
+        image_start: float,
+        css_queue: float,
+        js_queue: float,
+        font_queue: float,
+        image_queue: float,
+    ) -> dict[str, object]:
+        return browser_run(
+            load_ms=2500.0,
+            response_start_ms=120.0,
+            dom_content_loaded_ms=900.0,
+            load_event_end_ms=2500.0,
+            resources=[
+                {
+                    "name": "https://www.torproject.org/static/css/bootstrap.css?h=0d5c9bf6",
+                    "initiatorType": "link",
+                    "nextHopProtocol": "http/1.1",
+                    "duration": 900.0,
+                    "fetchStart": css_start - css_queue,
+                    "requestStart": css_start,
+                    "responseStart": css_start + 100.0,
+                    "responseEnd": css_start + 700.0,
+                },
+                {
+                    "name": "https://www.torproject.org/static/js/main.js?h=46d1f82f",
+                    "initiatorType": "script",
+                    "nextHopProtocol": "http/1.1",
+                    "duration": 1100.0,
+                    "fetchStart": js_start - js_queue,
+                    "requestStart": js_start,
+                    "responseStart": js_start + 100.0,
+                    "responseEnd": js_start + 900.0,
+                },
+                {
+                    "name": "https://www.torproject.org/static/fonts/SourceSansPro/SourceSansPro-Bold.ttf",
+                    "initiatorType": "font",
+                    "nextHopProtocol": "http/1.1",
+                    "duration": 1000.0,
+                    "fetchStart": font_start - font_queue,
+                    "requestStart": font_start,
+                    "responseStart": font_start + 100.0,
+                    "responseEnd": font_start + 800.0,
+                },
+                {
+                    "name": "https://www.torproject.org/static/images/hero.png",
+                    "initiatorType": "img",
+                    "nextHopProtocol": "http/1.1",
+                    "duration": 1200.0,
+                    "fetchStart": image_start - image_queue,
+                    "requestStart": image_start,
+                    "responseStart": image_start + 100.0,
+                    "responseEnd": image_start + 900.0,
+                },
+                {
+                    "name": "https://www.torproject.org/static/images/extra.png",
+                    "initiatorType": "img",
+                    "nextHopProtocol": "http/1.1",
+                    "duration": 1300.0,
+                    "fetchStart": image_start + 50.0,
+                    "requestStart": image_start + 150.0,
+                    "responseStart": image_start + 250.0,
+                    "responseEnd": image_start + 1000.0,
+                },
+            ],
+        )
+
+    return {
+        "profiles": {
+            "bundled_c_tor_browser_seeded": {
+                "runs": [
+                    profile_run(
+                        run_index=1,
+                        boot_seconds=2.0,
+                        browser=make_browser(
+                            css_start=100.0,
+                            js_start=200.0,
+                            font_start=300.0,
+                            image_start=500.0,
+                            css_queue=20.0,
+                            js_queue=50.0,
+                            font_queue=30.0,
+                            image_queue=100.0,
+                        ),
+                    ),
+                    profile_run(
+                        run_index=2,
+                        boot_seconds=2.2,
+                        browser=make_browser(
+                            css_start=120.0,
+                            js_start=240.0,
+                            font_start=320.0,
+                            image_start=520.0,
+                            css_queue=40.0,
+                            js_queue=70.0,
+                            font_queue=40.0,
+                            image_queue=120.0,
+                        ),
+                    ),
+                ]
+            },
+            "bundled_c_tor_browser_seeded_maxconn_7": {
+                "runs": [
+                    profile_run(
+                        run_index=1,
+                        boot_seconds=2.1,
+                        browser=make_browser(
+                            css_start=100.0,
+                            js_start=430.0,
+                            font_start=320.0,
+                            image_start=720.0,
+                            css_queue=20.0,
+                            js_queue=130.0,
+                            font_queue=40.0,
+                            image_queue=180.0,
+                        ),
+                    ),
+                    profile_run(
+                        run_index=2,
+                        boot_seconds=2.3,
+                        browser=make_browser(
+                            css_start=120.0,
+                            js_start=470.0,
+                            font_start=340.0,
+                            image_start=760.0,
+                            css_queue=40.0,
+                            js_queue=150.0,
+                            font_queue=50.0,
+                            image_queue=200.0,
+                        ),
+                    ),
+                ]
+            },
+        }
+    }
+
+
 class AnalyzeTorfastBrowserCompareTests(unittest.TestCase):
     def test_phase_summary_rows_capture_launch_and_navigation_medians(self) -> None:
         rows = phase_summary_rows(fixture_payload())
@@ -1250,6 +1393,43 @@ class AnalyzeTorfastBrowserCompareTests(unittest.TestCase):
         self.assertEqual(row["median_fetch_start_after_stylesheet_end_ms"], 100.0)
         self.assertEqual(row["median_request_start_after_stylesheet_end_ms"], 500.0)
         self.assertEqual(row["top_css_selectors"], ".fa-github-png")
+
+    def test_startup_family_schedule_rows_capture_first_request_order(self) -> None:
+        rows = startup_family_schedule_rows(startup_schedule_payload())
+
+        css_row = next(row for row in rows if row["family"] == "site css")
+        js_row = next(row for row in rows if row["family"] == "site js")
+        image_row = next(row for row in rows if row["family"] == "site image")
+
+        self.assertEqual(css_row["median_first_request_start_ms"], 110.0)
+        self.assertEqual(css_row["median_first_request_order"], 1.0)
+        self.assertEqual(css_row["median_first_fetch_to_request_ms"], 30.0)
+
+        self.assertEqual(js_row["median_first_request_start_ms"], 220.0)
+        self.assertEqual(js_row["median_first_request_order"], 2.0)
+        self.assertEqual(js_row["median_first_fetch_to_request_ms"], 60.0)
+
+        self.assertEqual(image_row["median_first_request_start_ms"], 510.0)
+        self.assertEqual(image_row["median_first_request_order"], 4.0)
+        self.assertEqual(image_row["median_resources_per_run"], 2.0)
+        self.assertIn("hero.png", image_row["top_first_resources"])
+
+    def test_startup_family_schedule_delta_rows_flag_later_startup(self) -> None:
+        rows = startup_family_schedule_delta_rows(startup_schedule_payload(), limit=10)
+
+        js_row = next(row for row in rows if row["family"] == "site js")
+        image_row = next(row for row in rows if row["family"] == "site image")
+
+        self.assertEqual(js_row["delta_first_request_start_ms"], 230.0)
+        self.assertEqual(js_row["delta_first_request_order"], 1.0)
+        self.assertEqual(js_row["delta_first_fetch_to_request_ms"], 80.0)
+        self.assertEqual(js_row["phase_hint"], "request discovery")
+
+        self.assertEqual(image_row["delta_first_request_start_ms"], 230.0)
+        self.assertEqual(image_row["delta_first_request_order"], 0.0)
+        self.assertEqual(image_row["delta_first_fetch_to_request_ms"], 80.0)
+        self.assertEqual(image_row["delta_first_max_same_origin_active_in_queue"], 0.0)
+        self.assertEqual(image_row["phase_hint"], "request discovery")
 
     def test_resource_variant_swap_rows_detect_png_to_svg_swap(self) -> None:
         rows = resource_variant_swap_rows(resource_variant_swap_payload())
