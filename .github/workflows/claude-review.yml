@@ -1,0 +1,47 @@
+name: Claude Review (Fable)
+on:
+  pull_request:
+    types: [opened, ready_for_review, synchronize]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_FOUNDRY_API_KEY }}
+          use_sticky_comment: true
+          settings: |
+            {
+              "env": {
+                "CLAUDE_CODE_USE_FOUNDRY": "1",
+                "ANTHROPIC_FOUNDRY_RESOURCE": "elon-gpt55-eus2-0713",
+                "ANTHROPIC_FOUNDRY_API_KEY": "${{ secrets.ANTHROPIC_FOUNDRY_API_KEY }}"
+              }
+            }
+          claude_args: |
+            --model claude-fable-5
+            --max-turns 30
+          prompt: |
+            Review PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+            Focus on real bugs, security issues, and risky behavior changes. Skip style
+            nits and praise. Verify each suspicion against the actual code before
+            reporting it. Use inline comments for line-specific findings; keep the
+            summary comment short. If nothing is wrong, say so in one sentence.
