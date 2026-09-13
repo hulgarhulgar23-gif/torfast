@@ -35,7 +35,7 @@ jobs:
             name: Astra (GPT-6)
             base: https://elon-gpt55-eus2-0713.services.ai.azure.com/api/projects/gpt55-quota-eval/openai/v1
             model: gpt-6-astra
-            key_secret: ANTHROPIC_FOUNDRY_API_KEY
+            key_secret: FOUNDRY_API_KEY
           - id: muse
             name: Muse Spark
             base: https://opencode.ai/zen/go/v1
