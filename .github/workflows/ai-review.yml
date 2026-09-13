@@ -1,0 +1,59 @@
+name: AI Review
+
+# Advisory trio reviewer (CodeRabbit-style: sticky summary + inline findings).
+# Each model posts under its own marker and re-reviews on every push. A failed
+# reviewer must never block the PR or email, so both the job and the step are
+# continue-on-error. The diff is fetched via the API and never executed, so
+# pull_request_target is safe here.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: PR number to review
+        required: true
+
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number || inputs.pull_request }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: self-hosted
+    continue-on-error: true
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: astra
+            name: Astra (GPT-6)
+            base: https://elon-gpt55-eus2-0713.services.ai.azure.com/api/projects/gpt55-quota-eval/openai/v1
+            model: gpt-6-astra
+            key_secret: ANTHROPIC_FOUNDRY_API_KEY
+          - id: muse
+            name: Muse Spark
+            base: https://opencode.ai/zen/go/v1
+            model: muse-spark-1.2-contributor
+            key_secret: OPENCODE_API_KEY
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Review
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pull_request }}
+          REVIEW_ID: ${{ matrix.id }}
+          REVIEW_NAME: ${{ matrix.name }}
+          MODEL: ${{ matrix.model }}
+          PROVIDER_BASE: ${{ matrix.base }}
+          PROVIDER_KEY: ${{ secrets[matrix.key_secret] }}
+        run: python3 scripts/ai_review.py
