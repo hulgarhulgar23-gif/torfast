@@ -42,7 +42,7 @@ jobs:
             model: muse-spark-1.2-contributor
             key_secret: OPENCODE_API_KEY
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
       - name: Review
